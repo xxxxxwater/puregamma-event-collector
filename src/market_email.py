@@ -146,10 +146,12 @@ def session_label_en(session):
 
 
 class Renderer:
-    def __init__(self, colors=None, locale="zh"):
+    def __init__(self, colors=None, locale="zh", manage=None, wordmark="PureGamma"):
+        """manage replaces the footer's unsubscribe line (e.g. where the PureGamma AI account settings live)."""
         self.locale = "en" if locale == "en" else "zh"
         zh = self.locale == "zh"
-        self.t = T[self.locale]
+        self.t = dict(T[self.locale], **({"unsubscribe": manage} if manage else {}))
+        self.wordmark = wordmark
         self.c = PALETTE.get(colors or ("cn" if zh else "us"), PALETTE["cn"])
         self.zone = store.CST if zh else dt.timezone.utc
         self.colon, self.comma = ("：", "，") if zh else (": ", ", ")
@@ -443,7 +445,8 @@ class Renderer:
         if eq:
             flow = eq["stocks"]["flow"]
             word = self.t["inflow"] if flow >= 0 else self.t["outflow"]
-            bits.append(f"US stocks {word} {self.money(abs(flow))}" if en else f"美股资金{word} {self.money(abs(flow))}")
+            # A price/volume estimate, not a reported flow: say so even in the subject line.
+            bits.append(f"US stocks est. {word} {self.money(abs(flow))}" if en else f"美股资金估算{word} {self.money(abs(flow))}")
         return (" | " if en else "｜").join(bits)
 
     # ----- whole message -----
@@ -492,7 +495,7 @@ class Renderer:
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{BG};"><tr><td align="center" style="padding:16px 10px;">
 <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:100%;max-width:600px;">
 <tr><td style="background:{DARK};border-radius:10px 10px 0 0;padding:16px 18px;">
-  <div style="color:#ffffff;font-size:18px;font-weight:800;letter-spacing:0.5px;">PureGamma <span style="color:#98a2b3;font-weight:400;">· {esc(t["brand"])}</span></div>
+  <div style="color:#ffffff;font-size:18px;font-weight:800;letter-spacing:0.5px;">{esc(self.wordmark)} <span style="color:#98a2b3;font-weight:400;">· {esc(t["brand"])}</span></div>
   <div style="color:#98a2b3;font-size:12px;margin-top:4px;">{esc(when)} · {esc(t["scope"])}</div>
 </td></tr>
 <tr><td style="background:{CARD};border:1px solid {LINE};border-top:0;border-radius:0 0 10px 10px;padding:14px 16px;">
@@ -503,7 +506,7 @@ class Renderer:
 {''.join(cards)}
 <tr><td style="padding:4px 6px 20px 6px;color:{MUTED};font-size:11px;line-height:1.7;">{esc(t["footer"])}<br/>{esc(t["unsubscribe"])}</td></tr>
 </table></td></tr></table></body></html>"""
-        text = (f"PureGamma {t['brand']} · {when}\n\n{t['highlights']}:\n"
+        text = (f"{self.wordmark} {t['brand']} · {when}\n\n{t['highlights']}:\n"
                 + "\n".join(f"- {plain(line)}" for line in highlights) + f"\n\n{t['footer']}\n{t['unsubscribe']}")
         return subject, body, text
 

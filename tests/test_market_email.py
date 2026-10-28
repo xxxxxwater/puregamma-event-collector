@@ -47,7 +47,7 @@ class RenderTests(EmailFixture):
     def test_chinese_render_is_email_safe_and_complete(self):
         subject, body, text = em.Renderer(None, "zh").render(self.snapshot())
         self.assertTrue(subject.startswith("市场简报 10-28 08:31"))
-        self.assertIn("美股资金", subject)
+        self.assertIn("美股资金估算", subject)
         for part in ("今日要点", "加密资金与 Top 10", "加密衍生品", "美股概览与 Top 20 个股", "行业资金", "ETF 资金",
                      "跨资产", "市场研判", "不构成投资建议", "如需退订"):
             self.assertIn(part, body)
@@ -59,7 +59,7 @@ class RenderTests(EmailFixture):
     def test_english_render_translates_everything(self):
         subject, body, text = em.Renderer(None, "en").render(self.snapshot())
         self.assertTrue(subject.startswith("Market Brief Oct 28 00:31 UTC"))
-        self.assertIn("US stocks net", subject)
+        self.assertIn("US stocks est. net", subject)
         visible = __import__("html").unescape(body)
         for part in ("Today's highlights", "Crypto flows & Top 10", "Sector flows", "Technology", "Semiconductors",
                      "Bonds", "Gold", "US 500", "Market outlook", "not investment advice", "To unsubscribe"):

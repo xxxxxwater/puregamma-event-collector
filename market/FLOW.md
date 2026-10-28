@@ -271,3 +271,43 @@ sequenceDiagram
 ```
 
 ![图 7 · RSS 新闻推送（时序图）](diagrams-png/07-seq-news.png)
+
+## 图 8 · PureGamma AI 每日简报邮件（时序图）
+
+生产机上的 market-brief 只负责采集数据和渲染邮件，发信仍由 SaaS worker 负责，用户、偏好、时间、Credits 和幂等都沿用 SaaS 原有的逻辑。取不到简报时退回原来的日报合并稿，不会漏发。设计见 DESIGN.md 第 10 节。
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant MB as market-brief（生产机 sidecar）
+  participant SRC as Coinbase / Nasdaq 公共接口
+  participant SC as SaaS scheduler
+  participant W as SaaS worker
+  participant DB as SaaS 数据库
+  participant SM as Gandi SMTP
+  actor U as 客户
+  loop 每 60 秒
+    MB->>SRC: 15 个采集作业（各自的周期）
+    SRC-->>MB: JSON
+    Note over MB: 每 15 分钟保存一份快照
+  end
+  SC->>W: 每分钟触发 dispatch_due_daily_briefs<br/>（带 Redis 锁）
+  W->>DB: 查到点的每日简报偏好<br/>（各自当地时间，默认 08:30）
+  loop 每位到点的用户
+    W->>W: 生成个性化日报<br/>（照旧，进网页收件箱）
+    W->>MB: GET /brief?locale=zh|en<br/>只传语言，超时 8 秒，缓存 120 秒
+    alt 有简报且不超过 2 小时
+      MB-->>W: subject · html · text · taken_at · parts
+      Note over W: 邮件用市场简报
+    else 取不到、无效或过期
+      MB-->>W: 503 或超时
+      Note over W: 退回日报合并稿<br/>新格式渲染，主题带日期
+    end
+    W->>DB: 按幂等键去重，预扣 Credits<br/>（和原来一样）
+    W->>SM: 一封一人，收件人 = 账户邮箱
+    SM-->>U: 每日简报邮件
+    W->>DB: 记录投递结果（只存纯文本）<br/>结算或退还 Credits
+  end
+```
+
+![图 8 · PureGamma AI 每日简报邮件（时序图）](diagrams-png/08-seq-saas-email.png)

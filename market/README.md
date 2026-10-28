@@ -73,9 +73,9 @@ python3 -m unittest discover -s tests                              # 全部测�
 | `ALERTS_MAX_PER_DAY` | 8 | 每天最多推送条数 |
 | `QUIET_HOURS` | 0-8 | 北京时间静音时段，简报和推送都静音送达 |
 
-## 邮件推送（每日一封，取代原来 PureGamma AI 的企业邮箱推送）
+## 邮件推送（pg-test 自带渠道，默认关闭）
 
-现状：SMTP（Gandi，`noreply@puregamma.ai`）已经配置好，发送默认关闭。生产机的旧推送已在 2026-10-28 暂停，详见 DESIGN.md 第 9 节。
+现状：客户的每日简报邮件由生产机上的 PureGamma AI SaaS 发送，内容来自下面的"生产机 sidecar"（DESIGN.md 第 9、10 节）。pg-test 这个渠道只给自己或内部名单用，不要放客户名单。SMTP（Gandi，`noreply@puregamma.ai`）已经配好，`EMAIL_ENABLED` 默认是 `false`。
 
 开启步骤：
 
@@ -109,7 +109,30 @@ python3 -m unittest discover -s tests                              # 全部测�
 docker compose run --rm --no-deps market-report python /app/market_report.py --email-preview /data/email_preview.html --locale en
 ```
 
-恢复旧推送（不推荐，会和新推送重复）：在生产机上执行恢复说明里的 `DEL` 命令。
+## 生产机 sidecar（market-brief，给 PureGamma AI 每日简报供稿）
+
+部署在生产机 `/puregamma/market-brief`（本仓库的一个固定提交），compose 文件是 `deploy/market-brief/compose.yaml`。它只采集数据、渲染邮件：不连 Telegram，不发邮件，没有任何密钥。SaaS worker 在每位用户到点时读取 `http://market-brief:8790/brief?locale=zh|en`。
+
+```sh
+cd /puregamma/market-brief
+docker compose -p market-brief -f deploy/market-brief/compose.yaml ps              # 应显示 healthy
+docker compose -p market-brief -f deploy/market-brief/compose.yaml logs --tail=50
+# 从 SaaS 的网络里查看接口
+docker run --rm --network puregamma-ai_egress python:3.12-slim python -c \
+  "import json,urllib.request; print(json.load(urllib.request.urlopen('http://market-brief:8790/health')))"
+```
+
+在 SaaS 的 release 目录里，用 worker 镜像检查、预览，或者只给自己发一封测试邮件：
+
+```sh
+C="docker compose --env-file .env -f docker-compose.production.yml"
+$C run --rm --no-deps worker python -m packages.notifications.market_brief --check
+$C run --rm --no-deps worker python -m packages.notifications.market_brief --test-send 你的邮箱 --locale both
+```
+
+- **升级：** `git fetch origin && git checkout <提交>`，然后执行 `docker compose -p market-brief -f deploy/market-brief/compose.yaml up -d --force-recreate`。
+- **暂停供稿：** `docker compose -p market-brief -f deploy/market-brief/compose.yaml stop`。2 分钟内，邮件会自动改发日报合并稿（新格式），不会漏发。
+- **数据：** `data/market-brief/market_report.sqlite`，只有公开行情数据。删掉它就等于冷启动。
 
 ## 自检和排查
 

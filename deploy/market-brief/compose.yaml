@@ -1,0 +1,58 @@
+# market-brief: the headless market-report for the PureGamma AI daily brief e-mail (DESIGN.md section 10).
+# Collects public Coinbase/Nasdaq data, keeps a snapshot every 15 min and serves the rendered e-mail at
+# http://market-brief:8790/brief?locale=zh|en on the SaaS egress network. No Telegram, no SMTP, no secrets,
+# no personal data. Its own compose project, so a SaaS deploy (up --remove-orphans) never touches it.
+#
+#   cd /puregamma/market-brief && install -d -o 65534 -g 65534 data/market-brief
+#   docker compose -p market-brief -f deploy/market-brief/compose.yaml up -d
+name: market-brief
+services:
+  market-brief:
+    image: python:3.12-slim
+    restart: unless-stopped
+    user: '65534:65534'
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    cpus: '0.5'
+    mem_limit: 384m
+    pids_limit: 64
+    volumes:
+      - ../../src:/app:ro
+      - ../../data/market-brief:/data
+    environment:
+      TZ: UTC
+      PYTHONUNBUFFERED: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      TELEGRAM_ENABLED: 'false'
+      EMAIL_ENABLED: 'false'
+      ALERTS_ENABLED: 'false'
+      SNAPSHOT_REFRESH_MINUTES: '15'
+      REPORT_DB_PATH: /data/market_report.sqlite
+      BRIEF_HTTP_PORT: '8790'
+      BRIEF_WORDMARK: 'PureGamma AI'
+      BRIEF_MANAGE_ZH: '这是你的 PureGamma AI 账户的每日简报。如需修改发送时间或关闭，请登录 puregamma.ai，在「每日推送」中设置。'
+      BRIEF_MANAGE_EN: 'This is the daily brief for your PureGamma AI account. To change the delivery time or turn it off, sign in at puregamma.ai and open Daily Push.'
+      EMAIL_COLORS: 'cn'
+      EMAIL_COLORS_EN: 'us'
+      LOG_LEVEL: INFO
+    command: ['python', '/app/market_report.py']
+    healthcheck:
+      test: ['CMD', 'python', '/app/market_report.py', '--health']
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '3'
+    networks:
+      saas_egress:
+        aliases: [market-brief]
+networks:
+  saas_egress:
+    external: true
+    name: puregamma-ai_egress

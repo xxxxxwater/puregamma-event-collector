@@ -7,16 +7,21 @@ Architecture and definitions: market/DESIGN.md. Each loop iteration (60s):
    otherwise rebuild the snapshot every SNAPSHOT_REFRESH_MINUTES for the commands;
 3. after each snapshot, record anomalies and push new major ones (deduped, capped,
    silent during quiet hours).
+With TELEGRAM_ENABLED=false the service only collects and keeps snapshots fresh; with
+BRIEF_HTTP_PORT set it also serves the latest snapshot as the rendered e-mail brief
+(GET /brief?locale=zh|en, GET /health) for the PureGamma AI daily brief (DESIGN.md section 10).
 Read-only public data only; no Coinbase API key is used.
 """
 import argparse
 import html
 import http.client
+import http.server
 import json
 import logging
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -222,7 +227,8 @@ class MarketService:
         store.meta_set(self.con, "heartbeat", int(now))
         self.collector.run_due(now)
         store.meta_set(self.con, "heartbeat", int(now))
-        self.telegram_tick(now)
+        if self.send is not None:
+            self.telegram_tick(now)
         self.email_tick(now)
         if now - self.last_refresh >= self.refresh:
             try:
@@ -252,6 +258,101 @@ class MarketService:
         while True:
             self.tick(int(clock()))
             self.sleep(60)
+
+
+class BriefServer:
+    """Read-only view of the latest snapshot as the rendered e-mail, for the PureGamma AI daily brief.
+
+    brief(locale) -> (200, {ok, locale, snapshot_id, taken_at, age_seconds, subject, html, text, parts}) or
+    (503, {ok: false, error}) when there is no usable snapshot; health() reports heartbeat, snapshot age and jobs.
+    Nothing about recipients passes through here: callers send only a locale.
+    """
+
+    def __init__(self, db_path, colors=None, manage=None, wordmark="PureGamma", clock=time.time):
+        self.db_path, self.clock = db_path, clock
+        self.colors = colors or {"zh": "cn", "en": "us"}
+        self.manage, self.wordmark = manage or {}, wordmark
+        self.cache, self.lock = {}, threading.Lock()
+
+    def latest(self):
+        if not os.path.exists(self.db_path):
+            return None, 0, []
+        con = store.open_readonly(self.db_path)
+        try:
+            return store.latest_snapshot(con), int(store.meta_get(con, "heartbeat", 0) or 0), store.jobs_health(con)
+        finally:
+            con.close()
+
+    def brief(self, locale):
+        if locale not in ("zh", "en"):
+            return 400, {"ok": False, "error": "locale must be zh or en"}
+        snapshot, _beat, _jobs = self.latest()
+        if not snapshot:
+            return 503, {"ok": False, "error": "no snapshot yet"}
+        if not store.has_data(snapshot["status"]):
+            return 503, {"ok": False, "error": "all market sources failed", "taken_at": snapshot["taken_at"]}
+        key = (snapshot["id"], locale)
+        with self.lock:
+            rendered = self.cache.get(key)
+        if rendered is None:
+            rendered = email_channel.Renderer(self.colors.get(locale), locale, manage=self.manage.get(locale),
+                                              wordmark=self.wordmark).render(snapshot)
+            with self.lock:
+                self.cache = {k: v for k, v in self.cache.items() if k[0] == snapshot["id"]}
+                self.cache[key] = rendered
+        subject, body, text = rendered
+        parts = {k: "ok" if v == "ok" else "reused" if str(v).startswith("reused") else "unavailable"
+                 for k, v in snapshot["status"].items()}
+        return 200, {"ok": True, "locale": locale, "snapshot_id": snapshot["id"], "taken_at": snapshot["taken_at"],
+                     "age_seconds": int(self.clock()) - snapshot["taken_at"], "subject": subject, "html": body,
+                     "text": text, "parts": parts}
+
+    def health(self):
+        snapshot, beat, jobs_rows = self.latest()
+        now = int(self.clock())
+        ok = now - beat <= store.HEARTBEAT_MAX_AGE
+        failing = sorted(r["name"] for r in jobs_rows if r["last_error"])
+        return (200 if ok else 503), {"ok": ok, "heartbeat_age": now - beat,
+                                      "snapshot_age": now - snapshot["taken_at"] if snapshot else None,
+                                      "jobs_ok": len(jobs_rows) - len(failing), "jobs_total": len(jobs_rows),
+                                      "jobs_failing": failing}
+
+
+def brief_handler(server):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        server_version = "market-brief/1"
+
+        def do_GET(self):
+            url = urllib.parse.urlsplit(self.path)
+            try:
+                if url.path == "/brief":
+                    code, payload = server.brief((urllib.parse.parse_qs(url.query).get("locale") or ["zh"])[0])
+                elif url.path == "/health":
+                    code, payload = server.health()
+                else:
+                    code, payload = 404, {"ok": False, "error": "not found"}
+            except Exception as ex:      # a bad request must never take the collector down
+                LOG.warning("brief http %s failed: %s", url.path, str(ex)[:200])
+                code, payload = 500, {"ok": False, "error": type(ex).__name__}
+            body = json.dumps(payload, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            LOG.debug("http " + fmt, *args)
+    return Handler
+
+
+def serve_briefs(server, port, host="0.0.0.0"):
+    """Serve BriefServer on a daemon thread; returns the HTTP server (shutdown() stops it)."""
+    httpd = http.server.ThreadingHTTPServer((host, port), brief_handler(server))
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, name="brief-http", daemon=True).start()
+    return httpd
 
 
 def health(path, now):
@@ -316,7 +417,10 @@ def main():
         LOG.warning("REPORT_INTERVAL_HOURS=%d does not divide 24; using 4", hours)
         hours = 4
     send = None
-    if not args.dry_run:
+    telegram = env_flag("TELEGRAM_ENABLED")
+    if args.once and not telegram:
+        raise SystemExit("--once needs Telegram (TELEGRAM_ENABLED=false here)")
+    if telegram and not args.dry_run:
         with open(os.environ.get("TELEGRAM_TOKEN_FILE", "/run/secrets/telegram_bot_token"), encoding="utf-8") as f:
             token = f.read().strip()
         if ":" not in token:
@@ -346,10 +450,12 @@ def main():
                             alerts_enabled=env_flag("ALERTS_ENABLED"),
                             alerts_per_day=int(os.environ.get("ALERTS_MAX_PER_DAY", "8")), quiet=quiet,
                             email_send=email_send, email_recipients=email_recipients, email_colors=colors)
-    LOG.info("starting v2; interval=%dh (%s); refresh=%ds; alerts=%s max/day=%d; quiet hours (Beijing) %02d-%02d; "
-             "e-mail=%s; no API key", hours, store.schedule_label(hours), service.refresh, service.alerts_enabled,
-             service.alerts_per_day, *quiet,
-             (f"on, {len(email_recipients())} recipient(s), daily at each recipient's local time") if email_send else "off")
+    port = int(os.environ.get("BRIEF_HTTP_PORT", "0") or 0)
+    LOG.info("starting v2; telegram=%s; interval=%dh (%s); refresh=%ds; alerts=%s max/day=%d; quiet hours (Beijing) "
+             "%02d-%02d; e-mail=%s; brief http=%s; no API key", "on" if telegram else "off", hours,
+             store.schedule_label(hours), service.refresh, service.alerts_enabled, service.alerts_per_day, *quiet,
+             (f"on, {len(email_recipients())} recipient(s), daily at each recipient's local time") if email_send else "off",
+             port or "off")
     if args.dry_run or args.once:
         now = int(time.time())
         service.collector.run_due(now)
@@ -365,6 +471,9 @@ def main():
             send(text)
         LOG.info("manual brief sent (%d message(s))", len(messages))
         return
+    if port:
+        manage = {loc: os.environ.get(f"BRIEF_MANAGE_{loc.upper()}", "").strip() or None for loc in ("zh", "en")}
+        serve_briefs(BriefServer(db_path, colors, manage, os.environ.get("BRIEF_WORDMARK", "PureGamma").strip()), port)
     service.run()
 
 

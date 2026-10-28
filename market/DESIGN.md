@@ -161,16 +161,13 @@ v1（2026-10-28 上线）解决了"每 4 小时播报 + 命令"。v2 在此基�
 - **部署：** 先备份，迁移数据库（新增表和列），然后重建 `market-report`、重启 `collector`。
 - **上线后验证：** 美股开盘后核对实时数据，收盘后核对盘后字段语义。
 
-## 9. 邮件渠道（v2.2，取代 PureGamma AI 的每日简报邮件）
+## 9. 邮件渠道（v2.2，pg-test 自带，默认关闭）
 
-- **旧系统：**
-  - 原来的邮件由 PureGamma AI SaaS 在生产机（chris-aliyun-jp，47.245.55.228）上发送：worker 每分钟检查一次，每个账户被自动开通，在当地时间 08:30 收一封。
-  - 内容是 AI 写的英文 Markdown，而发信模块只做 HTML 转义，所以 `##`、`-` 原样显示，logo 显示成坏图。
-  - 2026-10-28 11:55:47 UTC 已暂停：在 Redis 里放了一个不过期的锁 `pg:lock:dispatch_due_daily_briefs`，分发任务每次都拿不到锁而跳过。
-  - 备份和恢复说明在生产机 `/root/pg-daily-brief-pause-20261028/`，恢复方法是 `DEL` 这个键。
-  - 已知风险：Redis 的淘汰策略是 allkeys-lru，内存吃紧时这个键可能被淘汰；Redis 数据卷重建时它也会丢失。彻底的办法是在 SaaS 代码里加一个开关。
-- **新方案：** 由 pg-test 的 market-report 发送。
-  - 内容来自快照里的结构化摘要（`market_digest`），数字和 Telegram 完全一致，不经过 AI 改写。
+- **现状（2026-10-28 定）：**
+  - 客户的每日简报邮件继续由生产机（chris-aliyun-jp）上的 PureGamma AI SaaS 发送：worker 每分钟检查一次，每个账户自动开通，在当地时间 08:30 收一封，每封扣 Credits，用户在「每日推送」里改时间或关闭。
+  - pg-test 不给客户发信，也不导出订阅名单，`EMAIL_ENABLED` 保持 `false`。内容和格式的升级走第 10 节。
+- **当天的暂停和恢复：** 旧推送曾被暂停两次：11:55:47 UTC 在 Redis 放了锁 `pg:lock:dispatch_due_daily_briefs`，12:15 又改了容器里的 scheduler。12:32 删掉了锁，12:40 还原了 scheduler，12:41 分发恢复正常。
+- **这个渠道的用途：** 给自己或内部名单发信，以及预览和测试。规则如下。
 - **收件人：**
   - 名单放在 `secrets/email_recipients.json`，权限 0600，格式是 `[{email, locale, timezone, local_time, enabled}]`。`EMAIL_TO` 是备用名单。
   - 数据库里只保存邮箱的哈希值，日志里从不出现邮箱地址。
@@ -194,3 +191,53 @@ v1（2026-10-28 上线）解决了"每 4 小时播报 + 命令"。v2 在此基�
   - 默认 `EMAIL_ENABLED=false`。
   - `--email-preview PATH --locale zh|en` 只生成预览，不发信。
   - `--email-test 地址 --locale zh|en` 手动发一封测试邮件。
+
+## 10. PureGamma AI 每日简报邮件接入（v2.3）
+
+2026-10-28 用户选了方案 A：生产机继续发每日简报，同时升级邮件的格式和内容。用户、偏好、发送时间、Credits 和退订方式都不变。时序图见 `diagrams/08-saas-daily-email.mmd`。
+
+- **旧邮件的问题：**
+  - SaaS 把 4 份 AI 日报的 Markdown 拼成一封邮件，但发信模块只做 HTML 转义，所以 `##`、`**`、`---` 原样显示。
+  - 页眉的 logo 是黑色单色 PNG，放在黑底上看不见，有的客户端还会显示成坏图。
+  - 主题永远是"PureGamma AI"。
+- **目标：**
+  1. 格式：正确渲染 Markdown，页眉换成文字标识，主题带上日期。
+  2. 内容：换成本项目的市场简报（中文/英文），数字和 Telegram 一致，不经过 AI 改写。
+  3. 不变：收件人仍是账户邮箱，按每个人的时区和时间发（默认 08:30），每封照常扣 Credits，幂等键不变。个性化日报照常生成，照常进网页收件箱。
+- **架构：**
+
+  ```
+  market-brief（生产机，本项目，独立 compose 项目）
+    15 个采集作业 → SQLite → 每 15 分钟一份快照 → GET /brief?locale=zh|en
+                                                     ↑ 请求里只有 locale
+  SaaS worker：dispatch_due_daily_briefs（每分钟）→ 每位到点的用户
+    → 日报照常生成（网页收件箱等渠道不变）
+    → 邮件：fetch_market_brief(locale)
+         ├ 有新鲜的简报 → 主题、HTML、纯文本都用简报
+         └ 取不到、无效或超过 2 小时 → 用日报合并稿（新格式渲染）
+    → send_notification（幂等键、Credits、收件人绑定账户邮箱，都不变）
+  ```
+
+- **接口：**
+  - `GET /brief?locale=zh|en`：返回 200 和 `{ok, locale, snapshot_id, taken_at, age_seconds, subject, html, text, parts}`。`parts` 是各部分的状态（`ok`、`reused` 或 `unavailable`），HTML 就是第 9 节的版式（约 66KB，低于 Gmail 102KB 的截断线）。
+  - 还没有快照，或者所有数据源都失败时，返回 503；locale 不对返回 400。同一份快照每种语言只渲染一次。
+  - `GET /health`：返回心跳、快照年龄和作业健康（`jobs_ok/jobs_total`、`jobs_failing`）。心跳超过 10 分钟没更新就返回 503。
+  - 页脚的退订句换成账户说明（`BRIEF_MANAGE_ZH/EN`）："如需修改发送时间或关闭，请登录 puregamma.ai，在「每日推送」中设置。"页眉文字用 `BRIEF_WORDMARK=PureGamma AI`。
+- **SaaS 改动（向 puregamma-ai 的 main 提 PR）：**
+  - `packages/notifications/market_brief.py`：取简报，超时 8 秒；校验字段，HTML 不超过 400KB；按语言缓存 120 秒，失败后 60 秒内不再请求。`MARKET_BRIEF_URL` 为空时整个功能关闭。另带 `--check`、`--preview`、`--test-send` 三个运维命令，`--test-send` 只接受一个地址，主题前加"[测试]"。
+  - `packages/workers/tasks.py`：邮件分支先取简报，取不到就用原来的合并稿，并给合并稿加上带日期的主题（"PureGamma AI 每日简报 · 10月29日"）。
+  - `packages/notifications/dispatcher.py`：只在 email 渠道把 `email_subject`、`email_html` 交给发信模块，数据库里仍然只存纯文本。
+  - `packages/notifications/email.py`：轻量 Markdown 渲染（标题、粗体、斜体、代码、链接、列表、引用、分隔线、表格），用文字标识代替图片 logo，可以传入完整的 HTML 和主题。登录验证码等其他邮件也会用上新的页眉。
+  - `docker-compose.production.yml`：只给 worker 加 `MARKET_BRIEF_URL`，默认 `http://market-brief:8790`，设成空值就关闭。
+- **部署：**
+  - sidecar 放在 `/puregamma/market-brief`，检出本仓库的固定提交，用 `docker compose -p market-brief -f deploy/market-brief/compose.yaml up -d` 启动。它是独立的 compose 项目，SaaS 部署时的 `up --remove-orphans` 不会删到它。
+  - sidecar 用生产机已有的 python:3.12-slim 镜像，以非 root 用户运行，根文件系统只读，限 0.5 核、384MB，只接在 `puregamma-ai_egress` 网络上，不占宿主机端口。
+  - SaaS 在当前 release 目录打补丁，只重建 worker 镜像，旧镜像打标签留作回滚。先用新镜像给用户本人发测试邮件，用户确认后才重建 worker 容器。不做数据库迁移，api 和 scheduler 不动。
+- **回滚：**
+  - 只撤内容：停掉 sidecar（`docker compose -p market-brief stop`），2 分钟内自动退回日报合并稿，新格式保留。
+  - 全部撤回：在 release 目录执行 `git apply -R` 撤掉补丁，把旧镜像标签打回 `puregamma-ai-worker:latest`，然后执行 `up -d --no-deps --no-build worker`。
+- **隐私与安全：** sidecar 只收到 locale，不接触任何用户数据。它不带 Telegram、SMTP 或任何密钥。
+- **已知限制：**
+  - 生产机上是冷启动：主动买卖的覆盖率要 4 小时才满，量比基线大约 12 小时补齐，实盘命中率从零开始累计。在这之前，邮件里相应位置会如实标注。
+  - api 容器没有重建，所以从 api 发出的邮件（例如登录验证码）在下次 SaaS 部署前还是旧页眉。
+  - 以后 SaaS 换别的提交重新部署时，必须带上这个 PR，否则会退回旧邮件。
