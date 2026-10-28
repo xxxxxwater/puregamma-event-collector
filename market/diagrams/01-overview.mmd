@@ -1,0 +1,42 @@
+flowchart TB
+  subgraph EXT["① 外部公开数据源（只读，不用 API Key）"]
+    CB["Coinbase 公共接口<br/>现货 · 1h K线 · 逐笔成交 · 盘口<br/>永续/交割期货 · 股票清单与类型"]
+    NQ["Nasdaq 公共接口<br/>watchlist 实时行情（每批 20 只）<br/>日线 · 板块行业 · ETF 名称 · 交易时段"]
+    RSS["RSS 订阅源<br/>AggrNews · Watcher Guru · Fed · SEC"]
+  end
+  subgraph MR["② market-report 容器（行情生产者）"]
+    JOBS["采集作业层 market_jobs<br/>15 个作业 · 各自周期 · 失败隔离"]
+    ANA["分析层（纯函数）<br/>crypto · derivs · equities · forecast"]
+    SNAP["快照组装 market_snapshot + 渲染 market_render"]
+    NOTI["定时简报 + 异动推送<br/>market_report · market_alerts"]
+  end
+  DB[("③ market_report.sqlite<br/>K线 · 主动买卖 · 衍生品 · 股票行情/日线<br/>快照 · 播报 · 异动 · 研判 · /q 卡片 · 作业健康")]
+  subgraph COL["④ collector 容器（RSS 新闻 + 命令）"]
+    HUB["RSSHub 容器"]
+    ING["RSS 采集 · 去重 · 分类分级 P0–P3"]
+    EDB[("events.db<br/>events · outbox · 翻译缓存")]
+    OUT["outbox 发送<br/>P0/P1 即时 · P2 整点摘要"]
+    LT["LibreTranslate<br/>英译中"]
+    CMD["命令轮询 getUpdates<br/>bot_commands（只读）"]
+  end
+  TG["⑤ Telegram Bot API"]
+  USER(["你的 Telegram 聊天"])
+  SMTP["⑥ 企业邮箱 SMTP"]
+  MAIL(["你的邮箱"])
+
+  CB --> JOBS
+  NQ --> JOBS
+  JOBS -- "时间序列" --> DB
+  DB --> ANA --> SNAP
+  SNAP -- "快照 · /q 卡片 · 异动" --> DB
+  SNAP --> NOTI
+  RSS --> HUB --> ING
+  ING --> EDB --> OUT
+  OUT <-- "翻译" --> LT
+  CMD -- "只读快照" --> DB
+  CMD -- "/news /logs" --> EDB
+  NOTI -- "每 4 小时 3 组简报 · 重大异动" --> TG
+  NOTI -- "HTML 邮件简报（北京 08/20 点，可配置）" --> SMTP --> MAIL
+  OUT -- "新闻" --> TG
+  TG <-- "getUpdates / 回复" --> CMD
+  TG <--> USER

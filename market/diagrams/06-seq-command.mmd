@@ -1,0 +1,24 @@
+sequenceDiagram
+  autonumber
+  actor U as 你
+  participant TG as Telegram Bot API
+  participant C as collector 命令轮询线程
+  participant MS as market_store（只读）
+  participant DB as market_report.sqlite
+  participant E as events.db
+  Note over C: 启动时 getMe 并 setMyCommands，注册 14 个命令菜单
+  U->>TG: /q NVDA（或 /market、/stocks、/sectors、/etf、/alerts、/predict …）
+  C->>TG: getUpdates（长轮询 25 秒）
+  TG-->>C: update
+  C->>C: 只认已配置的 chat_id，忽略启动前的消息，解析 /命令@bot
+  alt 行情命令
+    C->>MS: view_messages(视图) 或 quote_messages(代码)
+    MS->>DB: 只读打开（mode=ro），读最新快照或 quotes
+    DB-->>MS: 版块 HTML 或标的卡片
+    MS-->>C: 消息列表（注明数据时间，超过 1 小时提示过期）
+  else /news 或 /logs
+    C->>E: 读 outbox、sources
+    C->>MS: status_line（行情服务、15 个数据源健康、数据自检）
+  end
+  C->>TG: sendMessage（第一条引用原消息，超长自动分条）
+  TG-->>U: 回复

@@ -1,0 +1,18 @@
+sequenceDiagram
+  autonumber
+  participant F as RSS 源 / RSSHub
+  participant C as collector 主循环（每 2 秒）
+  participant E as events.db
+  participant LT as LibreTranslate
+  participant TG as Telegram Bot API
+  actor U as 你
+  C->>F: 拉取到期的订阅源（ETag / Last-Modified）
+  F-->>C: RSS / Atom
+  C->>C: 解析，6 小时内同事件去重，分类，分级 P0–P3
+  C->>E: 写 events 和 outbox（P0/P1 立即，P2 下一个整点，P3 不发）
+  C->>E: 取到期的 outbox
+  C->>LT: 英译中（结果缓存）
+  LT-->>C: 中文标题
+  C->>TG: sendMessage（P0/P1 单条，P2 每 5 条合并为摘要）
+  TG-->>U: 新闻
+  C->>E: 标记已发送，失败按 retry 延后

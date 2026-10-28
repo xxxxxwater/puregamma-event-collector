@@ -1,0 +1,76 @@
+{
+  "settings": {
+    "max_workers": 5,
+    "max_feed_bytes": 4194304,
+    "http_timeout_seconds": 13,
+    "db_retention_days": 60,
+    "max_notification_age_hours": 24,
+    "max_p2_age_hours": 6,
+    "poll_tick_seconds": 2
+  },
+  "sources": [
+    {
+      "id": "aggrnews",
+      "name": "aggrnews / AggrNewswire",
+      "url": "http://rsshub:1200/telegram/channel/AggrNewswire",
+      "interval_seconds": 60,
+      "trust": "B",
+      "default_priority": "P2",
+      "enabled": true
+    },
+    {
+      "id": "watcherguru",
+      "name": "Watcher Guru Official",
+      "url": "http://rsshub:1200/telegram/channel/WatcherGuru",
+      "interval_seconds": 60,
+      "trust": "B",
+      "default_priority": "P2",
+      "enabled": true
+    },
+    {
+      "id": "watcherguru_chat",
+      "name": "WatcherGuruChat (authorized MTProto only)",
+      "url": "http://group-reader:8766/rss",
+      "interval_seconds": 60,
+      "trust": "C",
+      "default_priority": "P2",
+      "enabled": false
+    },
+    {
+      "id": "fed_monetary",
+      "name": "Federal Reserve Monetary Policy",
+      "url": "https://www.federalreserve.gov/feeds/press_monetary.xml",
+      "interval_seconds": 60,
+      "trust": "A",
+      "default_priority": "P1",
+      "enabled": true
+    },
+    {
+      "id": "fed_all",
+      "name": "Federal Reserve All Press",
+      "url": "https://www.federalreserve.gov/feeds/press_all.xml",
+      "interval_seconds": 300,
+      "trust": "A",
+      "default_priority": "P2",
+      "enabled": true
+    },
+    {
+      "id": "sec_press",
+      "name": "SEC Press Releases",
+      "url": "https://www.sec.gov/news/pressreleases.rss",
+      "interval_seconds": 300,
+      "trust": "A",
+      "default_priority": "P2",
+      "enabled": true
+    },
+    {
+      "id": "rsshub_releases",
+      "name": "RSSHub Releases",
+      "url": "https://github.com/DIYgod/RSSHub/releases.atom",
+      "interval_seconds": 1800,
+      "trust": "A",
+      "default_priority": "P3",
+      "enabled": true
+    }
+  ]
+}

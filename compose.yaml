@@ -1,0 +1,92 @@
+name: puregamma-event-collector
+services:
+  rsshub:
+    image: diygod/rsshub:2026-09-17
+    restart: unless-stopped
+    cpus: '1.00'
+    mem_limit: 768m
+    environment:
+      NODE_ENV: production
+      CACHE_EXPIRE: '60'
+      TZ: UTC
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '3'
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:1200/healthz"]
+      interval: 30s
+      timeout: 8s
+      retries: 4
+      start_period: 30s
+    networks: [events]
+
+  group-reader:
+    profiles: [mtproto]
+    build:
+      context: .
+      dockerfile: group/Dockerfile
+    restart: unless-stopped
+    cpus: '0.25'
+    mem_limit: 192m
+    volumes:
+      - ./data/group:/state
+    secrets:
+      - telegram_api_id
+      - telegram_api_hash
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8766/healthz',timeout=3)"]
+      interval: 40s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks: [events]
+
+  collector:
+    image: python:3.13-alpine
+    restart: unless-stopped
+    cpus: '0.75'
+    mem_limit: 384m
+    depends_on:
+      rsshub:
+        condition: service_healthy
+    volumes:
+      - ./src:/app:ro
+      - ./config:/config:ro
+      - ./data:/data
+    secrets:
+      - telegram_bot_token
+    environment:
+      PYTHONUNBUFFERED: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      TZ: UTC
+      SOURCES_PATH: /config/sources.json
+      DB_PATH: /data/events.db
+      TELEGRAM_TOKEN_FILE: /run/secrets/telegram_bot_token
+      TELEGRAM_CHAT_ID: '${TELEGRAM_CHAT_ID:?Set in .env}'
+      LOG_LEVEL: INFO
+      HEALTH_PORT: '8765'
+    command: ["python", "/app/main.py"]
+    ports:
+      - '127.0.0.1:8765:8765'
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8765/healthz',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks: [events]
+
+secrets:
+  telegram_bot_token:
+    file: ./secrets/telegram_bot_token
+  telegram_api_id:
+    file: ./secrets/telegram_api_id
+  telegram_api_hash:
+    file: ./secrets/telegram_api_hash
+networks:
+  events:
+    driver: bridge
