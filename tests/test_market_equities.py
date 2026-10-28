@@ -120,13 +120,29 @@ class Board(unittest.TestCase):
         self.assertAlmostEqual(by["AAA"]["flow"], 1e9)
         self.assertAlmostEqual(by["BBB"]["flow"], -5.5e8)
         self.assertEqual(by["AAA"]["industry"], "半导体")
-        fraction = (3.25 * 60) / 390
-        self.assertAlmostEqual(by["AAA"]["rvol"], 1e7 / (2e6 * fraction ** 0.7))
+        # 12:45 ET = 195 minutes in, halfway between the 180 (40.2%) and 210 (44.5%) profile points.
+        self.assertAlmostEqual(by["AAA"]["rvol"], 1e7 / (2e6 * 0.4235))
         ov = e.equity_overview(rows)
         self.assertEqual([r["symbol"] for r in ov["top"]], ["BBB", "AAA", "CCC"])
         self.assertEqual(ov["sectors"][0]["name"], "科技")
         self.assertEqual(ov["etf_in"][0]["symbol"], "QQQ")
         self.assertEqual([g["name"] for g in ov["categories"]], [e.BROAD, e.LEVERAGED])
+
+    def test_intraday_volume_profile(self):
+        open_at, close_at = at("2026-10-28T09:30:00"), at("2026-10-28T16:00:00")
+        share = lambda hhmm, close=close_at: e.session_share(at("2026-10-28T" + hhmm + ":00"), open_at, close)
+        self.assertEqual(share("09:31"), e.MIN_SHARE)                   # one opening print is not a day's pace
+        self.assertAlmostEqual(share("10:00"), 0.118)
+        self.assertAlmostEqual(share("10:15"), 0.1555)
+        self.assertAlmostEqual(share("15:59"), 0.880 - (0.880 - 0.740) / 30)
+        self.assertAlmostEqual(share("17:00"), 0.880)                   # clamped at the close
+        self.assertAlmostEqual(share("12:45", None), 0.4235)             # no close known: a normal day
+        shares = [e.session_share(open_at + m * 60, open_at, close_at) for m in range(0, 391, 5)]
+        self.assertEqual(shares, sorted(shares))                         # cumulative: never decreases
+        # Early close (13:00 ET, 210 minutes): halfway through the session reads like 12:45 on a full day.
+        self.assertAlmostEqual(e.session_share(open_at + 105 * 60, open_at, at("2026-10-28T13:00:00")), 0.4235)
+        # The 2026-10-28 check: 53 minutes in, the median stock had 13.0% of its 20-day average volume.
+        self.assertAlmostEqual(0.130 / share("10:23"), 0.74, places=2)  # x^0.7 read 0.52
 
     def test_anomalies_live_gating_and_velocity(self):
         rows = self.rows(AAA=tick("AAA", last=100, chg_pct=13.0, volume=1e7))
@@ -163,6 +179,8 @@ class Universe(unittest.TestCase):
         self.assertEqual((s["phase"], s["date"], s["unverified"]), ("pre", "2026-10-27", False))
         live = e.session_info(INFO, {"A": tick()}, at("2026-10-28T11:00:00"))
         self.assertEqual((live["phase"], live["date"], live["as_of"]), ("open", "2026-10-28", "11:00"))
+        self.assertEqual((live["open_at"], live["close_at"]), (at("2026-10-28T09:30:00"), at("2026-10-28T16:00:00")))
+        self.assertIsNone(s["close_at"])
         self.assertEqual(e.completed_session_date(INFO, at("2026-10-28T17:00:00")), "2026-10-28")
         self.assertTrue(e.extended_hours(INFO, at("2026-10-28T04:00:00")))
         self.assertFalse(e.extended_hours(INFO, at("2026-10-28T20:00:00")))

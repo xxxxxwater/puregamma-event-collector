@@ -126,7 +126,7 @@ class SnapshotBuilder:
             if session["phase"] in ("after", "closed") and semantics == "failed" else {}
         baselines = store.volume_baselines(self.con, session["date"]) if session["date"] else {}
         rows = equities.board(ticks, store.equity_meta(self.con), baselines, data_at, session["open_at"], semantics,
-                              last_open)
+                              last_open, session.get("close_at"))
         if len(rows) < 100:
             raise sources.SourceError("只有 %d 只股票/ETF 可用" % len(rows))
         overview = equities.equity_overview(rows)

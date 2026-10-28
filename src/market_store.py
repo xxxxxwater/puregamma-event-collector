@@ -438,12 +438,20 @@ def forecast_record(con, target, since):
 # ---------- alerts ----------
 
 def add_alert(con, alert, now):
-    """Insert an anomaly once per key; returns True when it is new."""
+    """Record an anomaly once per key. True when it is new, or when an unpushed minor sighting has
+    just become major: a stock first seen at -8% (or before its turnover counts) must still be pushed
+    once it is -15% on real money. The escalated row takes `now`, the time of the push round."""
+    major = 1 if alert.get("major") else 0
     cur = con.execute("INSERT OR IGNORE INTO alerts(ts,key,kind,symbol,severity,major,text) VALUES(?,?,?,?,?,?,?)",
-                      (int(now), alert["key"], alert["kind"], alert["symbol"], alert["severity"],
-                       1 if alert.get("major") else 0, alert["text"]))
+                      (int(now), alert["key"], alert["kind"], alert["symbol"], alert["severity"], major,
+                       alert["text"]))
+    fresh = cur.rowcount == 1
+    if not fresh and major:
+        cur = con.execute("UPDATE alerts SET ts=?, severity=?, major=1, text=? WHERE key=? AND major=0 AND pushed=0",
+                          (int(now), alert["severity"], alert["text"], alert["key"]))
+        fresh = cur.rowcount == 1
     con.commit()
-    return cur.rowcount == 1
+    return fresh
 
 
 def mark_pushed(con, keys, silent):

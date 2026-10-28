@@ -27,6 +27,26 @@ class Alerts(unittest.TestCase):
         store.mark_pushed(self.con, push["keys"], push["silent"])
         self.assertIsNone(a.plan(self.con, [anomaly("A"), anomaly("C")], DAY_NOON + 900))   # already recorded
 
+    def test_minor_sighting_escalates_to_one_push(self):
+        early = dict(anomaly("move:F", major=False), symbol="F", text="F 大跌 -8.9%")
+        self.assertIsNone(a.plan(self.con, [early], DAY_NOON))                       # recorded, not pushed
+        self.assertIsNone(a.plan(self.con, [early], DAY_NOON + 900))                 # still minor: nothing
+        big = dict(early, major=True, severity=2.0, text="F 大跌 -15.1%")
+        push = a.plan(self.con, [big], DAY_NOON + 1800)
+        self.assertEqual(push["keys"], ["move:F"])
+        self.assertIn("F 大跌 -15.1%", push["text"])
+        store.mark_pushed(self.con, push["keys"], push["silent"])
+        self.assertIsNone(a.plan(self.con, [big], DAY_NOON + 2700))                  # pushed once only
+        row = self.con.execute("SELECT ts, severity, text FROM alerts WHERE key='move:F'").fetchone()
+        self.assertEqual((row["ts"], row["severity"], row["text"]), (DAY_NOON + 1800, 2.0, "F 大跌 -15.1%"))
+        self.assertEqual(store.pushed_since(self.con, a.beijing_midnight(DAY_NOON)), 1)
+
+    def test_major_held_back_by_the_cap_is_not_retried(self):
+        for i in range(2):
+            store.mark_pushed(self.con, a.plan(self.con, [anomaly(f"K{i}")], DAY_NOON + i * 60, max_per_day=2)["keys"], False)
+        self.assertIsNone(a.plan(self.con, [anomaly("LATE")], DAY_NOON + 300, max_per_day=2))
+        self.assertIsNone(a.plan(self.con, [anomaly("LATE")], DAY_NOON + 1200, max_per_day=3))  # recorded as major
+
     def test_one_line_per_symbol_but_all_keys_marked(self):
         twin = [dict(anomaly("move:X"), symbol="X", severity=2.0), dict(anomaly("volume:X"), symbol="X", severity=3.0)]
         push = a.plan(self.con, twin, DAY_NOON)

@@ -175,21 +175,35 @@ def session_view(tick, semantics="unverified", last_open=None):
             "unverified": status in ("after", "closed") and semantics != "validated"}
 
 
-def elapsed_fraction(now, open_at):
-    minutes = (now - open_at) / 60
-    return max(0.02, min(1.0, minutes / SESSION_MINUTES))
+# Cumulative share of a full day's volume traded after m minutes of the regular session, for the
+# median US stock: busy open, quiet midday, heavy last half hour; the closing auction (~12%) completes
+# the day. Replaces x^0.7, which follows the turnover-weighted big caps but read the median stock's
+# intraday RVOL ~45% low (2026-10-28: 0.52 all morning, against ~0.95 on the previous full days).
+VOLUME_PROFILE = ((0, 0.0), (30, 0.118), (60, 0.193), (90, 0.258), (120, 0.311), (150, 0.359), (180, 0.402),
+                  (210, 0.445), (240, 0.488), (270, 0.536), (300, 0.590), (330, 0.655), (360, 0.740), (390, 0.880))
+MIN_SHARE = 0.04     # the first minutes: keep a single opening print from exploding the ratio
 
 
-def expected_volume(avg_volume, live, fraction):
-    """Volume expected so far: front-loaded intraday profile f(x) = x^0.7 (approximation)."""
-    return avg_volume * (fraction ** 0.7 if live else 1.0)
+def session_share(now, open_at, close_at=None):
+    """Expected share of a full day's volume traded by `now`; an early close compresses the profile."""
+    length = (close_at - open_at) / 60 if close_at and close_at > open_at else SESSION_MINUTES
+    minutes = max(0.0, min(1.0, (now - open_at) / 60 / length)) * SESSION_MINUTES
+    for (m0, s0), (m1, s1) in zip(VOLUME_PROFILE, VOLUME_PROFILE[1:]):
+        if minutes <= m1:
+            return max(MIN_SHARE, s0 + (s1 - s0) * (minutes - m0) / (m1 - m0))
+    return VOLUME_PROFILE[-1][1]
 
 
-def board(ticks, meta, baselines, now, open_at=None, semantics="unverified", last_open=None):
+def expected_volume(avg_volume, live, share):
+    """Volume expected so far: the full-day average scaled by the intraday profile while live."""
+    return avg_volume * (share if live else 1.0)
+
+
+def board(ticks, meta, baselines, now, open_at=None, semantics="unverified", last_open=None, close_at=None):
     """Rows for every universe ticker with a usable session view."""
     rows = []
     last_open = last_open or {}
-    fraction = elapsed_fraction(now, open_at) if open_at else 1.0
+    share = session_share(now, open_at, close_at) if open_at else 1.0
     for ticker, tick in ticks.items():
         info = meta.get(ticker) or {}
         kind = info.get("kind")
@@ -199,7 +213,7 @@ def board(ticks, meta, baselines, now, open_at=None, semantics="unverified", las
         if not view or view["turnover"] <= 0 or view["change"] is None:
             continue
         avg = baselines.get(ticker)
-        rvol = view["volume"] / expected_volume(avg, view["live"], fraction) if avg else None
+        rvol = view["volume"] / expected_volume(avg, view["live"], share) if avg else None
         sector = SECTOR_ZH.get(info.get("sector") or "", info.get("sector") or "其他") if kind == "stock" else None
         rows.append({"symbol": ticker, "kind": kind, "name": info.get("name") or "", "sector": sector,
                      "industry": industry_zh(info.get("industry")) if kind == "stock" else None,
@@ -358,13 +372,14 @@ def session_info(info, ticks, now, semantics="unverified"):
         counts[t["status"]] = counts.get(t["status"], 0) + 1
     phase = max(counts, key=counts.get) if counts else "closed"
     now_et = dt.datetime.fromtimestamp(now, ET)
-    open_at, _ = _session_times(info or {})
+    open_at, close_at = _session_times(info or {})
     if phase in ("open", "after") and open_at:
         date = open_at.date().isoformat()
     else:
         date = completed_session_date(info, now)
     return {"phase": phase, "date": date, "as_of": now_et.strftime("%H:%M") if phase == "open" else None,
             "open_at": int(open_at.timestamp()) if open_at and phase == "open" else None,
+            "close_at": int(close_at.timestamp()) if close_at and phase == "open" else None,
             "unverified": phase in ("after", "closed") and semantics != "validated"}
 
 

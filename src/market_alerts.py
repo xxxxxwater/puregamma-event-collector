@@ -1,6 +1,7 @@
 """Anomaly push policy: record every anomaly once, push only new major ones.
 
-Dedupe: one key per symbol/type/direction/day (keys built by the analytics modules).
+Dedupe: one key per symbol/type/direction/day (keys built by the analytics modules). A key first
+seen as minor is pushed once if it later becomes major (escalation), never twice.
 Rate limit: at most `max_per_day` push messages per Beijing day; anomalies found in the
 same refresh are batched into one message. Quiet hours (Beijing) deliver silently.
 """
