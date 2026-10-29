@@ -94,13 +94,15 @@ def parse_feed(raw):
         if channel is None:
             channel = root
         items = channel.findall("item")
+        # RSS 1.0 puts <item> and its children in the purl.org/rss/1.0 namespace.
+        q = (lambda name: "{*}" + name) if tag == "rdf" else (lambda name: name)
         if tag == "rdf":
             items = root.findall("{*}item")
         for item in items:
-            title = strip_markup(text_of(item, "title"))
-            link = text_of(item, "link")
-            guid = text_of(item, "guid")
-            body = strip_markup(text_of(item, "description"))
+            title = strip_markup(text_of(item, q("title")))
+            link = text_of(item, q("link"))
+            guid = text_of(item, q("guid"))
+            body = strip_markup(text_of(item, q("description")))
             pub = parse_date(text_of(item, "pubDate") or text_of(item, "{*}date"))
             if title:
                 entries.append({"title": title, "link": link, "guid": guid, "summary": body[:800], "published": pub})

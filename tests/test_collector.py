@@ -22,5 +22,45 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(collector.classify("Ethics committee meets", OFFICIAL), ("general", "P3"))
 
 
+class ParseFeedTests(unittest.TestCase):
+    def test_rss2_item_fields(self):
+        raw = b"""<rss version="2.0"><channel><title>c</title><item><title>Fed holds rates</title>
+            <link>https://example.com/a</link><guid>g-1</guid><description>&lt;p&gt;Body&lt;/p&gt;</description>
+            <pubDate>Wed, 28 Oct 2026 18:00:00 GMT</pubDate></item></channel></rss>"""
+        [entry] = collector.parse_feed(raw)
+        self.assertEqual(entry["title"], "Fed holds rates")
+        self.assertEqual(entry["link"], "https://example.com/a")
+        self.assertEqual(entry["guid"], "g-1")
+        self.assertEqual(entry["summary"], "Body")
+        self.assertEqual(entry["published"], 1793210400)
+
+    def test_rss1_rdf_items_are_namespaced(self):
+        raw = b"""<?xml version="1.0"?>
+            <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+                     xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <channel><title>c</title></channel>
+              <item><title>Hello world</title><link>https://example.com/b</link>
+                <description>Text</description><dc:date>2026-10-28T18:00:00Z</dc:date></item>
+            </rdf:RDF>"""
+        [entry] = collector.parse_feed(raw)
+        self.assertEqual(entry["title"], "Hello world")
+        self.assertEqual(entry["link"], "https://example.com/b")
+        self.assertEqual(entry["summary"], "Text")
+        self.assertEqual(entry["published"], 1793210400)
+
+    def test_atom_alternate_link_and_naive_date_is_utc(self):
+        raw = b"""<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Release v1</title><id>tag:1</id>
+            <link rel="self" href="https://example.com/self"/><link href="https://example.com/alt"/>
+            <updated>2026-10-28T18:00:00</updated></entry></feed>"""
+        [entry] = collector.parse_feed(raw)
+        self.assertEqual(entry["link"], "https://example.com/alt")
+        self.assertEqual(entry["guid"], "tag:1")
+        self.assertEqual(entry["published"], 1793210400)
+
+    def test_html_error_page_is_rejected(self):
+        with self.assertRaises(ValueError):
+            collector.parse_feed(b"<html><body>503</body></html>")
+
+
 if __name__ == "__main__":
     unittest.main()
