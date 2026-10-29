@@ -54,6 +54,33 @@ class TickSemantics(unittest.TestCase):
         self.assertEqual((fallback["price"], fallback["change"], fallback["live"]), (9.9, 4.2, False))
         self.assertIsNone(e.session_view(after, "failed"))
 
+    def test_closed_rows_are_the_official_close(self):
+        # 2026-10-29 00:30 UTC, Market Closed: watchlist = Nasdaq info secondaryData ("Closed at 4:00 PM ET").
+        aapl = tick("AAPL", status="closed", last=343.83, chg_abs=-3.27, chg_pct=-0.94, volume=35_714_805,
+                    prev_close=347.10)
+        for semantics in ("unverified", "failed", "validated"):
+            view = e.session_view(aapl, semantics, last_open=tick("AAPL", last=343.99, chg_pct=-0.90, volume=16.7e6))
+            self.assertEqual((view["price"], view["change"], view["volume"]), (343.83, -0.94, 35_714_805))
+            self.assertEqual((view["live"], view["unverified"], view["ext"]), (False, False, None))
+        bar = e.daily_bar("AAPL", aapl, "2026-10-28", "failed")
+        self.assertEqual((bar["close"], bar["change"], bar["volume"]), (343.83, -0.94, 35_714_805))
+        after = tick("AAPL", status="after", last=345.75, chg_abs=1.92, chg_pct=0.56)
+        self.assertIsNone(e.daily_bar("AAPL", after, "2026-10-28"))         # after-hours: only once validated
+        self.assertIsNotNone(e.daily_bar("AAPL", after, "2026-10-28", "validated"))
+        self.assertIsNone(e.daily_bar("AAPL", tick("AAPL"), "2026-10-28"))  # never from a live row
+
+    def test_after_hours_sample_needs_after_rows_and_a_fresh_close(self):
+        close_at = at("2026-10-28T16:00:00")
+        last_open = {"A": dict(tick("A"), ts=close_at - 5 * 60), "B": dict(tick("B"), ts=close_at - 4 * 60)}
+        rows = {"A": tick("A", status="after"), "B": tick("B", status="closed")}
+        self.assertEqual(list(e.after_hours_sample(rows, last_open, close_at)), ["A"])
+        self.assertIsNone(e.after_hours_sample({"B": rows["B"]}, last_open, close_at))     # closed rows only
+        stale = {k: dict(v, ts=close_at - 41 * 60) for k, v in last_open.items()}          # host down at 15:19
+        self.assertIsNone(e.after_hours_sample(rows, stale, close_at))
+        self.assertIsNone(e.after_hours_sample(rows, last_open, None))
+        self.assertEqual(e.session_close(INFO), close_at)
+        self.assertIsNone(e.session_close({}))
+
     def test_after_hours_hypothesis_test(self):
         live = {f"T{i}": tick(f"T{i}", last=100.0, chg_pct=3.0) for i in range(25)}
         pre_like = {k: tick(k, status="after", last=101.0, chg_abs=1.0) for k in live}       # 101 - 1 = today close
@@ -181,6 +208,10 @@ class Universe(unittest.TestCase):
         self.assertEqual((live["phase"], live["date"], live["as_of"]), ("open", "2026-10-28", "11:00"))
         self.assertEqual((live["open_at"], live["close_at"]), (at("2026-10-28T09:30:00"), at("2026-10-28T16:00:00")))
         self.assertIsNone(s["close_at"])
+        closed = e.session_info(INFO, {"A": tick(status="closed")}, at("2026-10-28T21:00:00"))
+        self.assertEqual((closed["phase"], closed["date"], closed["unverified"]), ("closed", "2026-10-28", False))
+        after = e.session_info(INFO, {"A": tick(status="after")}, at("2026-10-28T17:00:00"))
+        self.assertTrue(after["unverified"])
         self.assertEqual(e.completed_session_date(INFO, at("2026-10-28T17:00:00")), "2026-10-28")
         self.assertTrue(e.extended_hours(INFO, at("2026-10-28T04:00:00")))
         self.assertFalse(e.extended_hours(INFO, at("2026-10-28T20:00:00")))

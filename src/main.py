@@ -599,7 +599,7 @@ def main():
                         result = err
                     ingest_result(con, src, result, utc_now(), config["settings"])
                 process_outbox(con, token, chat_id, utc_now(), translator)
-                if now - last_cleanup >= 86400:
+                if now - last_cleanup >= 3600:      # hourly, so a 1-day retention keeps about one day
                     cleanup(con, int(config["settings"]["db_retention_days"]))
                     last_cleanup = now
                 if args.once:

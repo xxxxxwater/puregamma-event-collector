@@ -21,6 +21,7 @@ class ServiceTests(unittest.TestCase):
         self.con = store.connect(self.path)
         self.sent = []
         self.fail_on = set()
+        self.telegram_down = False
         self.make()
 
     def make(self, market=None):
@@ -32,6 +33,8 @@ class ServiceTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def send(self, text, silent=False):
+        if self.telegram_down:
+            raise m.TelegramError("telegram network failure")
         if text in self.fail_on:
             self.fail_on.discard(text)
             raise m.TelegramError("telegram HTTP 502")
@@ -97,12 +100,30 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(store.broadcast_get(self.con, SLOT)["outcome"], "failed")
 
     def test_resume_sends_remaining_parts_only(self):
-        store.broadcast_start(self.con, SLOT, SLOT + 60, None, ["part-1", "part-2"])
-        self.fail_on.add("part-2")
+        store.broadcast_start(self.con, SLOT, SLOT + 60, None, ["part-1", "part-2", "part-3"])
+        store.broadcast_progress(self.con, SLOT, 1)                      # part-1 already delivered
+        self.fail_on.add("part-3")
         self.service.tick(SLOT + 60)
-        self.assertEqual(store.broadcast_get(self.con, SLOT)["parts_sent"], 1)
+        self.assertEqual(self.texts(), ["part-2"])
+        self.assertEqual(store.broadcast_get(self.con, SLOT)["parts_sent"], 2)
         self.service.tick(SLOT + 60 + 300)
-        self.assertEqual(self.texts()[:2], ["part-1", "part-2"])
+        self.assertEqual(self.texts(), ["part-2", "part-3"])                # same build, never mixed
+        self.assertEqual(store.broadcast_get(self.con, SLOT)["outcome"], "sent")
+
+    def test_unsent_brief_is_rebuilt_from_fresh_data(self):
+        self.market.down.add("api.nasdaq.com")
+        self.telegram_down = True
+        self.service.tick(SLOT + 60)                                       # built without US stocks, not delivered
+        stored = store.broadcast_get(self.con, SLOT)
+        self.assertEqual((stored["parts_sent"], stored["outcome"]), (0, "sending"))
+        self.assertIn("暂不可用", stored["messages"][1])
+        self.market.down.clear()
+        self.telegram_down = False
+        self.service.tick(SLOT + 60 + 300)
+        texts = self.texts()
+        self.assertEqual(len(texts), 3)
+        self.assertIn("盘前 · 展示 10-27 收盘数据", texts[1])               # rebuilt from the recovered data
+        self.assertNotIn("暂不可用", texts[1])
         self.assertEqual(store.broadcast_get(self.con, SLOT)["outcome"], "sent")
 
     def test_live_session_major_anomalies_pushed_once(self):

@@ -3,7 +3,7 @@
     "max_workers": 5,
     "max_feed_bytes": 4194304,
     "http_timeout_seconds": 13,
-    "db_retention_days": 60,
+    "db_retention_days": 1,
     "max_notification_age_hours": 24,
     "max_p2_age_hours": 6,
     "poll_tick_seconds": 2

@@ -273,9 +273,11 @@ class Collector:
         by_ticker = {t["ticker"]: t for t in ticks}
         self.cache.update(equity_ticks=by_ticker, equity_at=now)
         semantics = store.meta_get(self.con, "after_semantics", "unverified")
-        after = {k: t for k, t in by_ticker.items() if t["status"] in ("after", "closed")}
-        if after and semantics == "unverified":
-            result = equities.after_hours_check(after, store.last_open_ticks(self.con, now - 10 * HOUR, now))
+        if semantics == "unverified" and any(t["status"] == "after" for t in by_ticker.values()):
+            last_open = store.last_open_ticks(self.con, now - 10 * HOUR, now)
+            after = equities.after_hours_sample(by_ticker, last_open,
+                                                equities.session_close(self.cache.get("market_info")))
+            result = equities.after_hours_check(after, last_open) if after else None
             if result:
                 semantics = "validated" if result["ok"] else "failed"
                 store.meta_set(self.con, "after_semantics", semantics)

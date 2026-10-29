@@ -156,6 +156,11 @@ class MarketService:
 
     def broadcast(self, slot, now):
         row = store.broadcast_get(self.con, slot)
+        if row is not None and row["parts_sent"] == 0 and row["outcome"] == "sending":
+            # Nothing delivered yet: rebuild from the latest data rather than resend an old build
+            # (2026-10-29: a brief built while the network was down would have gone out all blank).
+            store.broadcast_discard(self.con, slot)
+            row = None
         if row is None:
             snapshot = self.build_snapshot(now)
             if store.has_data(snapshot["status"]):

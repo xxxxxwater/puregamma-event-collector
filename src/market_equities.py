@@ -151,14 +151,22 @@ def session_view(tick, semantics="unverified", last_open=None):
     pre           -> last completed session (verified 2026-10-28): close = last - netChange,
                      change = close / previousClose - 1, volume = that session's volume,
                      pre-market move = percentageChange.
-    after/closed  -> same derivation, which is only *assumed* until the after-hours self-check
+    closed        -> the regular session's official close (verified 2026-10-29 against Nasdaq
+                     info secondaryData "Closed at 4:00 PM ET" and summary ShareVolume):
+                     close = last, change = percentageChange (vs the previous close), volume.
+    after         -> the pre-market derivation, only *assumed* until the after-hours self-check
                      passes (semantics='validated'); 'failed' falls back to the last live tick.
     """
     status = tick["status"]
     if status == "open":
         return {"price": tick["last"], "change": tick["chg_pct"], "volume": tick["volume"],
                 "turnover": tick["volume"] * tick["last"], "ext": None, "live": True, "unverified": False}
-    if status in ("after", "closed") and semantics == "failed":
+    if status == "closed":
+        if not tick["last"] or tick["chg_pct"] is None:
+            return None
+        return {"price": tick["last"], "change": tick["chg_pct"], "volume": tick["volume"],
+                "turnover": tick["volume"] * tick["last"], "ext": None, "live": False, "unverified": False}
+    if status == "after" and semantics == "failed":
         if last_open:
             return dict(session_view(dict(last_open, status="open")), live=False)
         return None
@@ -172,7 +180,7 @@ def session_view(tick, semantics="unverified", last_open=None):
     ext = tick["chg_pct"] if status in ("pre", "after") and tick["chg_abs"] else None
     return {"price": close, "change": change, "volume": tick["volume"], "turnover": tick["volume"] * close,
             "ext": ext, "live": False, "ext_price": tick["last"] if ext is not None else None,
-            "unverified": status in ("after", "closed") and semantics != "validated"}
+            "unverified": status == "after" and semantics != "validated"}
 
 
 # Cumulative share of a full day's volume traded after m minutes of the regular session, for the
@@ -380,7 +388,7 @@ def session_info(info, ticks, now, semantics="unverified"):
     return {"phase": phase, "date": date, "as_of": now_et.strftime("%H:%M") if phase == "open" else None,
             "open_at": int(open_at.timestamp()) if open_at and phase == "open" else None,
             "close_at": int(close_at.timestamp()) if close_at and phase == "open" else None,
-            "unverified": phase in ("after", "closed") and semantics != "validated"}
+            "unverified": phase == "after" and semantics != "validated"}
 
 
 def extended_hours(info, now):
@@ -395,7 +403,7 @@ def extended_hours(info, now):
 
 def daily_bar(ticker, tick, session_date, semantics="unverified"):
     """Daily bar for the last completed session; only from verified derivations (DESIGN C2)."""
-    if tick["status"] == "open" or (tick["status"] != "pre" and semantics != "validated"):
+    if tick["status"] == "open" or (tick["status"] == "after" and semantics != "validated"):
         return None
     view = session_view(tick, semantics)
     if not view or not view["volume"]:
@@ -416,6 +424,24 @@ def history_bars(ticker, rows):
             out.append({"ticker": ticker, "date": date, "close": close, "change": None, "volume": volume,
                         "turnover": close * volume, "source": "nasdaq"})
     return out
+
+
+def after_hours_sample(ticks, last_open, close_at, max_gap=20 * 60):
+    """After-hours rows to test, or None. 'closed' rows are not a sample (their semantics differ and
+    are verified), and the last live ticks must be close to the bell to stand in for today's close:
+    on 2026-10-28 the host was down from 15:19 ET, which made the reference 40 minutes stale."""
+    after = {k: t for k, t in ticks.items() if t["status"] == "after"}
+    if not after or not last_open or not close_at:
+        return None
+    if close_at - max(t["ts"] for t in last_open.values()) > max_gap:
+        return None
+    return after
+
+
+def session_close(info):
+    """Today's regular close per Nasdaq market-info, as a timestamp (None when unknown)."""
+    _, close_at = _session_times(info or {})
+    return int(close_at.timestamp()) if close_at else None
 
 
 def after_hours_check(after_ticks, open_ticks, minimum=20):

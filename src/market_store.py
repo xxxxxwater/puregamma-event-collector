@@ -515,6 +515,13 @@ def broadcast_start(con, slot, now, snapshot_id, messages, kind="brief"):
     con.commit()
 
 
+def broadcast_discard(con, slot):
+    """Drop a slot's stored messages while nothing of it has been delivered yet."""
+    cur = con.execute("DELETE FROM broadcasts WHERE slot=? AND parts_sent=0 AND outcome='sending'", (int(slot),))
+    con.commit()
+    return cur.rowcount == 1
+
+
 def broadcast_progress(con, slot, parts_sent):
     con.execute("UPDATE broadcasts SET parts_sent=? WHERE slot=?", (parts_sent, int(slot)))
     con.commit()
