@@ -110,6 +110,14 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.texts(), ["part-2", "part-3"])                # same build, never mixed
         self.assertEqual(store.broadcast_get(self.con, SLOT)["outcome"], "sent")
 
+    def test_tick_budget_defers_remaining_jobs(self):
+        ticks = iter(range(0, 10_000, 100))
+        first = self.service.collector.run_due(SLOT + 60, budget=150, clock=lambda: next(ticks))
+        self.assertEqual(len(first), 2)        # started at 0 s; job 2 checked at 100 s runs, job 3 at 200 s waits
+        rest = self.service.collector.run_due(SLOT + 120, budget=10_000)
+        self.assertEqual(set(first) & set(rest), set())                    # the deferred jobs run next tick
+        self.assertEqual(len(first) + len(rest), 15)
+
     def test_unsent_brief_is_rebuilt_from_fresh_data(self):
         self.market.down.add("api.nasdaq.com")
         self.telegram_down = True

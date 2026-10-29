@@ -11,6 +11,50 @@ def iso(ts):
     return dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+class CircuitBreaker(unittest.TestCase):
+    def setUp(self):
+        s._circuit.clear()
+        self.now, self.calls, self.fail = 1000.0, [], True
+        self.real = s.urllib.request.urlopen
+        s.urllib.request.urlopen = self.urlopen
+
+    def tearDown(self):
+        s.urllib.request.urlopen = self.real
+        s._circuit.clear()
+
+    def urlopen(self, request, timeout=None):
+        self.calls.append(request.full_url)
+        if self.fail == "http":
+            raise s.urllib.error.HTTPError(request.full_url, 503, "busy", {}, None)
+        if self.fail:
+            raise s.urllib.error.URLError("network is unreachable")
+        import io
+        return io.BytesIO(b'{"ok": 1}')
+
+    def get(self, url):
+        return s.get_json(url, sleep=lambda _s: None, clock=lambda: self.now)
+
+    def test_network_failure_opens_the_circuit_for_that_host_only(self):
+        with self.assertRaises(s.SourceError):
+            self.get("https://api.nasdaq.com/api/quote/watchlist")
+        self.assertEqual(len(self.calls), 3)                              # retried, then gave up
+        with self.assertRaises(s.SourceError) as ctx:
+            self.get("https://api.nasdaq.com/api/market-info")
+        self.assertIn("skipped", str(ctx.exception))
+        self.assertEqual(len(self.calls), 3)                              # failed fast, no new request
+        self.fail = False
+        self.assertEqual(self.get("https://api.coinbase.com/api/v3/x"), {"ok": 1})   # other hosts unaffected
+        self.now += s.CIRCUIT_SECONDS + 1
+        self.assertEqual(self.get("https://api.nasdaq.com/api/market-info"), {"ok": 1})
+        self.assertNotIn("api.nasdaq.com", s._circuit)                    # closed again after a success
+
+    def test_http_errors_do_not_open_it(self):
+        self.fail = "http"
+        with self.assertRaises(s.SourceError):
+            self.get("https://api.nasdaq.com/api/market-info")
+        self.assertEqual(s._circuit, {})
+
+
 class Paging(unittest.TestCase):
     def test_trades_walk_back_dedupe_and_page_cap(self):
         trades = [{"trade_id": str(i), "time": iso(1000 + i * 0.5), "price": "1", "size": "1", "side": "BUY"}

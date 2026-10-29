@@ -20,6 +20,7 @@ import market_store as store
 LOG = logging.getLogger("market.jobs")
 HOUR = 3600
 DAY = 86400
+TICK_BUDGET = 8 * 60       # seconds of jobs per loop round before the rest wait a tick
 TOP_CANDLES = 30
 TOP_TRADES = 6
 TOP_BOOKS = 5
@@ -58,11 +59,17 @@ class Collector:
 
     # ----- scheduling -----
 
-    def run_due(self, now):
-        """Run every due job in order; returns the names of the jobs that ran."""
-        ran = []
+    def run_due(self, now, budget=TICK_BUDGET, clock=time.monotonic):
+        """Run due jobs in order; returns the names of the jobs that ran. After `budget` seconds no
+        new job starts: the rest run next tick (those that ran are no longer due), so briefs and
+        snapshots never wait behind a slow round."""
+        ran, started = [], clock()
         for job in self.jobs:
             if now >= self.next_run.get(job.name, 0):
+                if ran and clock() - started > budget:
+                    LOG.warning("tick budget spent after %ds; %s and later jobs wait for the next tick",
+                                clock() - started, job.name)
+                    break
                 self.run(job, now)
                 ran.append(job.name)
         return ran

@@ -25,6 +25,8 @@ GRANULARITY = {"ONE_MINUTE": 60, "FIVE_MINUTE": 300, "FIFTEEN_MINUTE": 900, "THI
 MAX_CANDLES = 350
 TRADES_PAGE = 1000
 WATCHLIST_BATCH = 20          # the endpoint silently answers only the first 20 symbols
+CIRCUIT_SECONDS = 120         # after a network-level failure, requests to that host fail fast this long
+_circuit = {}                 # host -> monotonic deadline of its open circuit
 
 
 class SourceError(RuntimeError):
@@ -38,23 +40,37 @@ def _retry_after(error):
         return None
 
 
-def get_json(url, params=None, headers=None, timeout=30, attempts=3, sleep=time.sleep):
-    """GET JSON with bounded retries on 429/5xx/network errors (list params repeat the key)."""
+def get_json(url, params=None, headers=None, timeout=30, attempts=3, sleep=time.sleep, clock=time.monotonic):
+    """GET JSON with bounded retries on 429/5xx/network errors (list params repeat the key).
+
+    Circuit breaker: once a host fails at the network level after all retries, further requests to
+    it fail at once for CIRCUIT_SECONDS. On 2026-10-29 a flaky network made one collection round
+    take two hours (every batch waiting out its timeouts), so no snapshot or brief went out.
+    """
     full = url + ("?" + urllib.parse.urlencode(params, doseq=True) if params else "")
     request_headers = {"Accept": "application/json", "User-Agent": COINBASE_UA}
     request_headers.update(headers or {})
-    where = urllib.parse.urlsplit(url).netloc + urllib.parse.urlsplit(url).path
+    host = urllib.parse.urlsplit(url).netloc
+    where = host + urllib.parse.urlsplit(url).path
+    if _circuit.get(host, 0) > clock():
+        raise SourceError(f"{host} unreachable just now, skipped ({where})")
     delay = 2
     for attempt in range(1, attempts + 1):
+        network = False
         try:
             with urllib.request.urlopen(urllib.request.Request(full, headers=request_headers), timeout=timeout) as resp:
-                return json.load(resp)
+                data = json.load(resp)
+            _circuit.pop(host, None)
+            return data
         except urllib.error.HTTPError as ex:
             retryable, wait, reason = ex.code == 429 or ex.code >= 500, _retry_after(ex) or delay, "HTTP %d" % ex.code
         except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as ex:
             # OSError covers timeouts/resets; ValueError covers truncated or non-JSON bodies.
             retryable, wait, reason = True, delay, type(ex).__name__
+            network = not isinstance(ex, ValueError)
         if not retryable or attempt == attempts:
+            if network:
+                _circuit[host] = clock() + CIRCUIT_SECONDS
             raise SourceError(f"{reason} from {where}")
         LOG.info("retrying %s after %s (attempt %d/%d)", where, reason, attempt, attempts)
         sleep(min(wait, 30))
