@@ -8,6 +8,7 @@ import contextlib
 import datetime as dt
 import hashlib
 import html
+import http.client
 import json
 import logging
 import os
@@ -258,8 +259,9 @@ def run_command_poller(token, authorized_chat_id, db_path, heartbeat, lock, sour
                             if index == 0:
                                 fields["reply_to_message_id"] = reply[1]
                             telegram_api(token, "sendMessage", fields, timeout=15)
-                except (sqlite3.Error, ValueError, RuntimeError, OSError) as exc:
-                    # OSError covers URLError and read timeouts (TimeoutError is not a URLError).
+                except Exception as exc:
+                    # One bad reply (rendering bug, BadStatusLine, read timeout...) must not kill the
+                    # poller thread: nothing restarts it and the update is already acknowledged.
                     LOG.warning("command reply failed (%s)", type(exc).__name__)
         except urllib.error.HTTPError as exc:
             if exc.code == 409:
@@ -267,8 +269,9 @@ def run_command_poller(token, authorized_chat_id, db_path, heartbeat, lock, sour
             else:
                 LOG.warning("Telegram command polling HTTP %d", exc.code)
             stop_event.wait(30)
-        except (ValueError, KeyError, RuntimeError, OSError) as exc:
-            # OSError covers URLError and long-poll read timeouts, which would otherwise kill this thread.
+        except (ValueError, KeyError, RuntimeError, OSError, http.client.HTTPException) as exc:
+            # OSError covers URLError and long-poll read timeouts; HTTPException covers BadStatusLine and
+            # IncompleteRead, which urlopen/json.load raise unwrapped. Either would otherwise kill this thread.
             # Never log urllib exception text: it can contain the bot token URL.
             LOG.warning("Telegram command polling failed (%s)", type(exc).__name__)
             stop_event.wait(15)

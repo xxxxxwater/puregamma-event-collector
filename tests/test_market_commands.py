@@ -136,5 +136,33 @@ class MarketCommandTests(unittest.TestCase):
         self.assertEqual(calls.count("getUpdates"), 2)
 
 
+    def test_poller_survives_http_protocol_errors_and_reply_crashes(self):
+        import http.client
+        stop = threading.Event()
+        stop.wait = lambda timeout=None: stop.is_set()  # skip the real back-off sleep
+        calls = []
+        update = {"update_id": 7, "message": {"message_id": 3, "date": NOW, "chat": {"id": 123}, "text": "/market"}}
+
+        def api(_token, method, fields, timeout=35):
+            calls.append(method)
+            if method in ("getMe", "setMyCommands"):
+                return {}
+            n = calls.count("getUpdates")
+            if n == 1:
+                raise http.client.BadStatusLine("")      # urlopen does not wrap these in URLError
+            if n == 2:
+                raise http.client.IncompleteRead(b"{")
+            if n == 3:
+                return [update]
+            stop.set()
+            return []
+
+        with patch.object(commands, "MARKET_DB_PATH", self.market_db), \
+                patch.object(commands.market_store, "view_messages", side_effect=TypeError("bad row")), \
+                patch.object(commands, "telegram_api", side_effect=api):
+            commands.run_command_poller("redacted", "123", self.news_db, {}, threading.Lock(), [],
+                                        stop, lambda: NOW)
+        self.assertEqual(calls.count("getUpdates"), 4)
+
 if __name__ == "__main__":
     unittest.main()
