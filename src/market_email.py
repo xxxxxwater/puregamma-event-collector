@@ -10,6 +10,7 @@ import datetime as dt
 import hashlib
 import html
 import json
+import logging
 import re
 import smtplib
 import ssl
@@ -23,6 +24,8 @@ from market_analysis import SECTOR_ZH
 from market_equities import INDUSTRY_ZH
 from market_forecast import FACTOR_ZH
 from market_render import fmt_pct, fmt_price, fmt_usd
+
+LOG = logging.getLogger("market.email")
 
 PALETTE = {"cn": {"up": "#d92d20", "down": "#079455"}, "us": {"up": "#079455", "down": "#d92d20"}}
 INK, MUTED, LINE, CARD, BG, DARK, ACCENT = "#101828", "#667085", "#eaecf0", "#ffffff", "#f2f4f7", "#0b0d12", "#2e90fa"
@@ -543,7 +546,9 @@ def load_recipients(path=None, fallback=(), default_locale="zh", default_time="0
         except Exception:
             timezone = DEFAULT_TIMEZONE[locale]
         local_time = str(row.get("local_time") or default_time)
-        if not re.fullmatch(r"\d{1,2}:\d{2}", local_time):
+        # due_today() feeds these into datetime.replace(); "24:00" or "9:75" would raise there every tick.
+        clock = re.fullmatch(r"(\d{1,2}):(\d{2})", local_time)
+        if not clock or int(clock.group(1)) > 23 or int(clock.group(2)) > 59:
             local_time = default_time
         out.append({"email": email, "locale": locale, "timezone": timezone, "local_time": local_time})
     return out
@@ -575,10 +580,14 @@ def smtp_sender(host, port, user, password, sender, security="auto", reply_to=No
         if mode == "ssl":
             return smtplib.SMTP_SSL(host, int(port), timeout=timeout, context=context)
         client = smtplib.SMTP(host, int(port), timeout=timeout)
-        client.ehlo()
-        if mode == "starttls":
-            client.starttls(context=context)
+        try:
             client.ehlo()
+            if mode == "starttls":
+                client.starttls(context=context)
+                client.ehlo()
+        except BaseException:
+            client.close()
+            raise
         return client
 
     def send(to, subject, html_body, text_body):
@@ -592,17 +601,24 @@ def smtp_sender(host, port, user, password, sender, security="auto", reply_to=No
         message.add_alternative(html_body, subtype="html", charset="utf-8")
         last = "unknown"
         for attempt in range(1, 4):
+            accepted = False
             try:
                 with connect() as client:
                     if user:
                         client.login(user, password)
                     client.send_message(message)
+                    accepted = True
                 return
             except smtplib.SMTPAuthenticationError:
                 raise EmailError("SMTP 认证失败（检查账号或授权码）") from None
             except smtplib.SMTPRecipientsRefused:
                 raise EmailError("收件人被拒绝") from None
             except (smtplib.SMTPException, OSError) as ex:
+                if accepted:
+                    # The server took the message; only QUIT/close failed (SMTP.__exit__ raises on a
+                    # non-221 reply). Retrying would deliver a duplicate.
+                    LOG.warning("SMTP session ended uncleanly after delivery (%s)", type(ex).__name__)
+                    return
                 last = type(ex).__name__
                 if attempt < 3:
                     sleep(5 * attempt)
