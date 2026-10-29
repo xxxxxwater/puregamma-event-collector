@@ -174,24 +174,26 @@ def classify(title, source):
         if PRIORITIES[level] < PRIORITIES[priority]:
             priority = level
 
-    if re.search(r"\b(fomc|federal reserve|fed|interest rate|rate decision|powell|美联储|降息|加息)\b", t):
+    # CJK characters are all \w, so \b never fires between adjacent Chinese
+    # characters: Chinese keywords must stay outside the \b(...)\b group.
+    if re.search(r"\b(fomc|federal reserve|fed|interest rate|rate decision|powell)\b|美联储|降息|加息", t):
         apply("macro.monetary", "P1")
-    if re.search(r"\b(cpi|inflation|nonfarm|non farm|payrolls|pce|unemployment|通胀|非农)\b", t):
+    if re.search(r"\b(cpi|inflation|nonfarm|non farm|payrolls|pce|unemployment)\b|通胀|非农", t):
         apply("macro.data", "P1")
-    if re.search(r"\b(sec|cftc|etf|regulation|regulator|custody|批准|监管)\b", t):
+    if re.search(r"\b(sec|cftc|etf|regulation|regulator|custody)\b|批准|监管", t):
         apply("regulation", "P1")
-    if re.search(r"\b(btc|bitcoin|eth|ethereum|crypto|币安|比特币|以太坊|币圈)\b", t):
+    if re.search(r"\b(btc|bitcoin|eth|ethereum|crypto)\b|币安|比特币|以太坊|币圈", t):
         if category == "general":
             category = "crypto.market"
-    if re.search(r"\b(hack|hacked|exploit|breach|bankrupt|insolvent|outage|security incident|遭攻击|盗币|破产)\b", t):
+    if re.search(r"\b(hack|hacked|exploit|breach|bankrupt|insolvent|outage|security incident)\b|遭攻击|盗币|破产", t):
         apply("crypto.security", "P0")
     if re.search(r"(\bdelist(?:s|ed|ing)?\b|\bsuspend(?:s|ed)? trading\b|\bhalts? trading\b|下架|暂停交易)", t):
         apply("exchange.delisting", "P0")
-    elif re.search(r"\b(listing|new listing|listed on|new token|上线)\b", t):
+    elif re.search(r"\b(listing|new listing|listed on|new token)\b|上线", t):
         apply("exchange.listing", "P1")
-    if re.search(r"\b(fomc statement|rate decision|cut rates|hike rates|cuts rates|raises rates|利率决议)\b", t):
+    if re.search(r"\b(fomc statement|rate decision|cut rates|hike rates|cuts rates|raises rates)\b|利率决议", t):
         apply("macro.policy_decision", "P0")
-    if re.search(r"\b(earnings|revenue|guidance|财报)\b", t):
+    if re.search(r"\b(earnings|revenue|guidance)\b|财报", t):
         apply("equities.earnings", "P1")
     # Do not elevate unverified discussion-group posts to P0/P1.
     if trust == "C":
