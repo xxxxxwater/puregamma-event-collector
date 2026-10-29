@@ -1,9 +1,14 @@
+import gc
+import json
 import socket
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import unittest
+import urllib.request
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -200,6 +205,26 @@ class OutboxTests(CollectorDb):
             collector.cleanup(self.con, 60)
         self.assertIsNone(self.con.execute("SELECT 1 FROM events WHERE id='expired_old'").fetchone())
         self.assertEqual(self.status("pending_old"), "pending")
+
+
+class HealthServerTests(unittest.TestCase):
+    def test_status_reports_counts_and_closes_its_connection(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = tmp.name + "/events.db"
+        con = collector.db_connect(path)
+        collector.init_db(con, [NEWS])
+        con.close()
+        srv = collector.launch_health_server(path, 0, [NEWS])
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            with urllib.request.urlopen("http://127.0.0.1:%d/status" % srv.server_address[1], timeout=5) as resp:
+                payload = json.load(resp)
+            gc.collect()
+        self.assertEqual((payload["events"], payload["pending"], [s["id"] for s in payload["sources"]]), (0, 0, ["news"]))
+        self.assertFalse([w for w in caught if "unclosed database" in str(w.message)])
 
 
 if __name__ == "__main__":

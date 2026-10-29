@@ -5,6 +5,7 @@ Only stdlib dependencies. Secrets are read from a Docker secret, never logged.
 """
 import argparse
 import concurrent.futures
+import contextlib
 import datetime as dt
 import email.utils
 import hashlib
@@ -557,7 +558,8 @@ def launch_health_server(db_path, port, sources):
                 self.send_error(404)
                 return
             try:
-                with db_connect(db_path) as conn:
+                # sqlite3's own context manager only commits; it never closes.
+                with contextlib.closing(db_connect(db_path)) as conn:
                     source_states = [dict(x) for x in conn.execute("SELECT id,seeded,last_ok,last_check,last_error,consecutive_errors FROM sources ORDER BY id")]
                     pending = conn.execute("SELECT COUNT(*) FROM outbox WHERE status='pending'").fetchone()[0]
                     sent = conn.execute("SELECT COUNT(*) FROM outbox WHERE status='sent'").fetchone()[0]
