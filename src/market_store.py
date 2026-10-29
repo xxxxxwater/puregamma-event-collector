@@ -451,6 +451,11 @@ def mark_pushed(con, keys, silent):
     con.commit()
 
 
+def forget_unpushed_alerts(con, keys):
+    con.executemany("DELETE FROM alerts WHERE key=? AND pushed=0", [(k,) for k in keys])
+    con.commit()
+
+
 def pushed_since(con, since):
     return con.execute("SELECT COUNT(DISTINCT ts) FROM alerts WHERE pushed=1 AND ts>=?", (int(since),)).fetchone()[0]
 

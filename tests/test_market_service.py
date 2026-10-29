@@ -120,6 +120,35 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len([t for t in self.texts() if "异动提醒" in t]), 1)
         self.assertGreater(self.con.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 1)
 
+    def test_failed_anomaly_push_is_retried_on_next_refresh(self):
+        self.make(FakeMarket(status="Market Open", change=15.0, volume=30_000_000))
+        live_now = SLOT + 11 * 3600
+        attempts = []
+
+        def flaky(text, silent=False):
+            if "异动提醒" in text:
+                attempts.append(text)
+                if len(attempts) == 1:
+                    raise m.TelegramError("telegram HTTP 502")
+            self.send(text, silent)
+        self.service.send = flaky
+        self.service.tick(live_now)
+        self.assertEqual((len(attempts), [t for t in self.texts() if "异动提醒" in t]), (1, []))
+        self.service.build_snapshot(live_now + 900)
+        self.assertEqual(len([t for t in self.texts() if "异动提醒" in t]), 1)
+        self.assertEqual(store.pushed_since(self.con, 0), 1)                # one push counted against the cap
+        self.service.build_snapshot(live_now + 1800)
+        self.assertEqual(len(attempts), 2)
+
+    def test_email_failure_does_not_stop_the_tick(self):
+        def broken_recipients():
+            raise ValueError("bad recipients file")
+        self.service.email_send = lambda *args: None
+        self.service.email_recipients = broken_recipients
+        self.service.tick(SLOT + 60)                                        # must not raise
+        self.assertEqual(len(self.texts()), 3)
+        self.assertEqual(self.service.last_refresh, SLOT + 60)
+
 
 class TelegramSenderTests(unittest.TestCase):
     TOKEN = "123:SECRET"

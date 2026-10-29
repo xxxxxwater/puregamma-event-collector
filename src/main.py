@@ -5,6 +5,7 @@ Only stdlib dependencies. Secrets are read from a Docker secret, never logged.
 """
 import argparse
 import concurrent.futures
+import contextlib
 import datetime as dt
 import email.utils
 import hashlib
@@ -94,13 +95,15 @@ def parse_feed(raw):
         if channel is None:
             channel = root
         items = channel.findall("item")
+        # RSS 1.0 puts <item> and its children in the purl.org/rss/1.0 namespace.
+        q = (lambda name: "{*}" + name) if tag == "rdf" else (lambda name: name)
         if tag == "rdf":
             items = root.findall("{*}item")
         for item in items:
-            title = strip_markup(text_of(item, "title"))
-            link = text_of(item, "link")
-            guid = text_of(item, "guid")
-            body = strip_markup(text_of(item, "description"))
+            title = strip_markup(text_of(item, q("title")))
+            link = text_of(item, q("link"))
+            guid = text_of(item, q("guid"))
+            body = strip_markup(text_of(item, q("description")))
             pub = parse_date(text_of(item, "pubDate") or text_of(item, "{*}date"))
             if title:
                 entries.append({"title": title, "link": link, "guid": guid, "summary": body[:800], "published": pub})
@@ -174,24 +177,26 @@ def classify(title, source):
         if PRIORITIES[level] < PRIORITIES[priority]:
             priority = level
 
-    if re.search(r"\b(fomc|federal reserve|fed|interest rate|rate decision|powell|美联储|降息|加息)\b", t):
+    # CJK characters are all \w, so \b never fires between adjacent Chinese
+    # characters: Chinese keywords must stay outside the \b(...)\b group.
+    if re.search(r"\b(fomc|federal reserve|fed|interest rate|rate decision|powell)\b|美联储|降息|加息", t):
         apply("macro.monetary", "P1")
-    if re.search(r"\b(cpi|inflation|nonfarm|non farm|payrolls|pce|unemployment|通胀|非农)\b", t):
+    if re.search(r"\b(cpi|inflation|nonfarm|non farm|payrolls|pce|unemployment)\b|通胀|非农", t):
         apply("macro.data", "P1")
-    if re.search(r"\b(sec|cftc|etf|regulation|regulator|custody|批准|监管)\b", t):
+    if re.search(r"\b(sec|cftc|etf|regulation|regulator|custody)\b|批准|监管", t):
         apply("regulation", "P1")
-    if re.search(r"\b(btc|bitcoin|eth|ethereum|crypto|币安|比特币|以太坊|币圈)\b", t):
+    if re.search(r"\b(btc|bitcoin|eth|ethereum|crypto)\b|币安|比特币|以太坊|币圈", t):
         if category == "general":
             category = "crypto.market"
-    if re.search(r"\b(hack|hacked|exploit|breach|bankrupt|insolvent|outage|security incident|遭攻击|盗币|破产)\b", t):
+    if re.search(r"\b(hack|hacked|exploit|breach|bankrupt|insolvent|outage|security incident)\b|遭攻击|盗币|破产", t):
         apply("crypto.security", "P0")
     if re.search(r"(\bdelist(?:s|ed|ing)?\b|\bsuspend(?:s|ed)? trading\b|\bhalts? trading\b|下架|暂停交易)", t):
         apply("exchange.delisting", "P0")
-    elif re.search(r"\b(listing|new listing|listed on|new token|上线)\b", t):
+    elif re.search(r"\b(listing|new listing|listed on|new token)\b|上线", t):
         apply("exchange.listing", "P1")
-    if re.search(r"\b(fomc statement|rate decision|cut rates|hike rates|cuts rates|raises rates|利率决议)\b", t):
+    if re.search(r"\b(fomc statement|rate decision|cut rates|hike rates|cuts rates|raises rates)\b|利率决议", t):
         apply("macro.policy_decision", "P0")
-    if re.search(r"\b(earnings|revenue|guidance|财报)\b", t):
+    if re.search(r"\b(earnings|revenue|guidance)\b|财报", t):
         apply("equities.earnings", "P1")
     # Do not elevate unverified discussion-group posts to P0/P1.
     if trust == "C":
@@ -283,13 +288,26 @@ def fetch(source, etag, modified, config):
     if modified:
         headers["If-Modified-Since"] = modified
     req = urllib.request.Request(source["url"], headers=headers)
+    timeout = int(config["http_timeout_seconds"])
+    # urlopen's timeout applies per socket operation; a server dribbling bytes
+    # could otherwise hold a worker, and the whole poll loop, indefinitely.
+    deadline = time.monotonic() + float(config.get("http_total_timeout_seconds", timeout * 3))
     try:
-        with urllib.request.urlopen(req, timeout=int(config["http_timeout_seconds"])) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             length = int(response.headers.get("Content-Length") or 0)
             limit = int(config["max_feed_bytes"])
             if length > limit:
                 raise ValueError("feed exceeds configured max length")
-            body = response.read(limit + 1)
+            chunks, size = [], 0
+            while size <= limit:
+                chunk = response.read1(min(65536, limit + 1 - size))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+                if time.monotonic() > deadline:
+                    raise TimeoutError("feed download exceeded total timeout")
+            body = b"".join(chunks)
             if len(body) > limit:
                 raise ValueError("feed exceeds configured max length")
             entries = parse_feed(body)
@@ -372,10 +390,14 @@ def ingest_result(con, source, result, now, config):
         etag, modified = None, None
     added, events_added, enqueued = (0, 0, 0) if not_changed else add_entries(
         con, source, entries, now, seeded, int(config["max_notification_age_hours"]), int(config["max_p2_age_hours"]))
+    # An empty first response (RSSHub hiccup, upstream truncation) is not a
+    # baseline: seeding on it would push the whole backlog on the next fetch.
+    now_seeded = seeded or (not not_changed and bool(entries))
     con.execute("UPDATE sources SET seeded=?, etag=?, modified=?, last_ok=?, last_check=?, last_error=NULL, consecutive_errors=0, next_at=? WHERE id=?",
-                (int(seeded or not not_changed), etag, modified, now, now, now + interval + random.randint(0, 8), source["id"]))
+                (int(now_seeded), etag if now_seeded else None, modified if now_seeded else None,
+                 now, now, now + interval + random.randint(0, 8), source["id"]))
     con.commit()
-    if added or enqueued or not seeded:
+    if added or enqueued or now_seeded != seeded:
         LOG.info("source=%s seed=%s entries=%d new_events=%d enqueued=%d", source["id"], "complete" if not seeded else "done", added, events_added, enqueued)
 
 
@@ -442,9 +464,27 @@ def telegram_send(token, chat_id, message):
         return False, None, 90, "network failure"
 
 
-def process_outbox(con, token, chat_id, now, translator=None):
+def expire_stale_outbox(con, now, max_age_h=24, p2_age_h=6):
+    """Drop pending pushes that outlived the enqueue age limits.
+
+    After a long Telegram outage, collector downtime or a message Telegram keeps
+    rejecting, a "breaking" alert hours late is noise; the event stays queryable.
+    """
+    cur = con.execute("""UPDATE outbox SET status='expired', last_error='stale: not delivered in time'
+                         WHERE status='pending' AND due_at<=? AND
+                         (SELECT last_seen FROM events e WHERE e.id=outbox.event_id)
+                             < ? - CASE WHEN priority='P2' THEN ? ELSE ? END""",
+                      (now, now, int(p2_age_h) * 3600, int(max_age_h) * 3600))
+    if cur.rowcount:
+        con.commit()
+        LOG.warning("outbox expired stale notifications count=%d", cur.rowcount)
+    return cur.rowcount
+
+
+def process_outbox(con, token, chat_id, now, translator=None, max_age_h=24, p2_age_h=6):
     # P0/P1 immediate; P2 grouped hourly (max 5 items per digest).
     translator = translator or Translator(enabled=False)
+    expire_stale_outbox(con, now, max_age_h, p2_age_h)
     rows = con.execute("""SELECT o.id, o.attempts, o.priority, e.* FROM outbox o
                           JOIN events e ON e.id=o.event_id WHERE o.status='pending' AND o.due_at<=?
                           ORDER BY o.due_at ASC, o.id ASC LIMIT 20""", (now,)).fetchall()
@@ -504,6 +544,7 @@ def process_outbox(con, token, chat_id, now, translator=None):
 def cleanup(con, days):
     cutoff = utc_now() - int(days) * 86400
     con.execute("DELETE FROM outbox WHERE status='sent' AND sent_at<?", (cutoff,))
+    con.execute("DELETE FROM outbox WHERE status='expired' AND due_at<?", (cutoff,))
     con.execute("DELETE FROM articles WHERE discovered<? AND event_id NOT IN (SELECT event_id FROM outbox WHERE status='pending')", (cutoff,))
     con.execute("DELETE FROM events WHERE discovered<? AND id NOT IN (SELECT event_id FROM articles) AND id NOT IN (SELECT event_id FROM outbox)", (cutoff,))
     con.commit()
@@ -517,7 +558,8 @@ def launch_health_server(db_path, port, sources):
                 self.send_error(404)
                 return
             try:
-                with db_connect(db_path) as conn:
+                # sqlite3's own context manager only commits; it never closes.
+                with contextlib.closing(db_connect(db_path)) as conn:
                     source_states = [dict(x) for x in conn.execute("SELECT id,seeded,last_ok,last_check,last_error,consecutive_errors FROM sources ORDER BY id")]
                     pending = conn.execute("SELECT COUNT(*) FROM outbox WHERE status='pending'").fetchone()[0]
                     sent = conn.execute("SELECT COUNT(*) FROM outbox WHERE status='sent'").fetchone()[0]
@@ -598,7 +640,9 @@ def main():
                     except Exception as err:
                         result = err
                     ingest_result(con, src, result, utc_now(), config["settings"])
-                process_outbox(con, token, chat_id, utc_now(), translator)
+                process_outbox(con, token, chat_id, utc_now(), translator,
+                               int(config["settings"]["max_notification_age_hours"]),
+                               int(config["settings"]["max_p2_age_hours"]))
                 if now - last_cleanup >= 86400:
                     cleanup(con, int(config["settings"]["db_retention_days"]))
                     last_cleanup = now

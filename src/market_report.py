@@ -138,7 +138,12 @@ class MarketService:
         try:
             push = alerts.plan(self.con, anomalies, now, self.alerts_enabled, self.alerts_per_day, self.quiet)
             if push:
-                self.send(push["text"], silent=push["silent"])
+                try:
+                    self.send(push["text"], silent=push["silent"])
+                except Exception:
+                    # plan() only pushes newly recorded keys; forget them so the next refresh retries.
+                    store.forget_unpushed_alerts(self.con, push["keys"])
+                    raise
                 store.mark_pushed(self.con, push["keys"], push["silent"])
                 LOG.info("alert pushed (%d anomalies, silent=%s)", len(push["keys"]), push["silent"])
         except Exception as ex:   # an alert problem must never break snapshots or briefs
@@ -223,7 +228,10 @@ class MarketService:
         self.collector.run_due(now)
         store.meta_set(self.con, "heartbeat", int(now))
         self.telegram_tick(now)
-        self.email_tick(now)
+        try:
+            self.email_tick(now)
+        except Exception:   # an e-mail problem must never stop briefs, alerts or the process
+            LOG.exception("e-mail tick failed")
         if now - self.last_refresh >= self.refresh:
             try:
                 self.build_snapshot(now)

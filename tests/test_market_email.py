@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -103,6 +104,15 @@ class RecipientTests(unittest.TestCase):
         self.assertEqual((rows[1]["timezone"], rows[1]["local_time"]), ("Asia/Shanghai", "08:30"))
         self.assertEqual(em.load_recipients("/nonexistent", ()), [])
 
+    def test_out_of_range_local_time_falls_back_to_default(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump([{"email": "a@x.com", "local_time": "24:00"}, {"email": "b@x.com", "local_time": "9:75"},
+                       {"email": "c@x.com", "local_time": "23:59"}], f)
+        rows = em.load_recipients(f.name, (), "zh", "08:30")
+        self.assertEqual([r["local_time"] for r in rows], ["08:30", "08:30", "23:59"])
+        for row in rows:
+            em.due_today(row, ZH_DUE, 2700)                               # must not raise
+
     def test_due_today_window(self):
         zh = RECIPIENTS[0]
         self.assertIsNone(em.due_today(zh, ZH_DUE - 60, 2700))
@@ -154,6 +164,8 @@ class SchedulingTests(EmailFixture):
 
 class SmtpTests(unittest.TestCase):
     class FakeSMTP:
+        quit_reply = 221
+
         def __init__(self, log, failures):
             self.log, self.failures = log, failures
 
@@ -161,6 +173,8 @@ class SmtpTests(unittest.TestCase):
             return self
 
         def __exit__(self, *exc):
+            if self.quit_reply != 221:                                    # what smtplib.SMTP.__exit__ does
+                raise smtplib.SMTPResponseException(self.quit_reply, b"closing")
             return False
 
         def login(self, user, password):
@@ -195,6 +209,33 @@ class SmtpTests(unittest.TestCase):
         send, log, modes, waits = self.sender(failures=[1], port=465)
         send("a@example.com", "s", "<p>h</p>", "t")
         self.assertEqual((modes, waits, log[-1][0]), (["ssl", "ssl"], [5], "send"))
+
+    def test_failed_quit_after_delivery_is_not_resent(self):
+        with patch.object(self.FakeSMTP, "quit_reply", 421):
+            send, log, modes, waits = self.sender()
+            send("a@example.com", "s", "<p>h</p>", "t")
+        self.assertEqual(([e[0] for e in log], modes, waits), (["login", "send"], ["starttls"], []))
+
+    def test_starttls_failure_closes_the_socket(self):
+        clients = []
+
+        class BrokenTLS:
+            def __init__(self, *args, **kwargs):
+                self.closed = False
+                clients.append(self)
+
+            def ehlo(self):
+                pass
+
+            def starttls(self, context=None):
+                raise smtplib.SMTPNotSupportedError("no STARTTLS")
+
+            def close(self):
+                self.closed = True
+        send = em.smtp_sender("smtp.example.com", 587, "u", "p", "bot@example.com", sleep=lambda s: None)
+        with patch.object(em.smtplib, "SMTP", BrokenTLS), self.assertRaises(em.EmailError):
+            send("a@example.com", "s", "h", "t")
+        self.assertEqual([c.closed for c in clients], [True, True, True])
 
     def test_auth_error_is_sanitized(self):
         send, _, _, _ = self.sender(password="bad")

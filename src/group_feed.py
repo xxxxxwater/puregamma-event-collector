@@ -5,6 +5,7 @@ This module has no dependencies; the network-side reader is in group_reader.py.
 import datetime as dt
 import json
 import os
+import re
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -34,6 +35,15 @@ def read_json(path, default):
         return default
 
 
+# XML 1.0 forbids most C0 controls; ElementTree writes them raw and one message would
+# make the whole feed unparseable until it ages out of the last 250 items.
+XML_INVALID = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]')
+
+
+def xml_text(value):
+    return XML_INVALID.sub('', value)
+
+
 def make_rss(items):
     rss = ET.Element('rss', attrib={'version':'2.0'})
     channel = ET.SubElement(rss, 'channel')
@@ -43,8 +53,9 @@ def make_rss(items):
     for it in reversed(items[-250:]):
         message = ET.SubElement(channel, 'item')
         ET.SubElement(message, 'guid', attrib={'isPermaLink':'false'}).text = f"watcherguruchat:{it['id']}"
-        ET.SubElement(message, 'title').text = it['text'][:280].replace('\n', ' ')
+        text = xml_text(it['text'])
+        ET.SubElement(message, 'title').text = text[:280].replace('\n', ' ')
         ET.SubElement(message, 'link').text = f"https://t.me/WatcherGuruChat/{it['id']}"
-        ET.SubElement(message, 'description').text = it['text'][:800]
+        ET.SubElement(message, 'description').text = text[:800]
         ET.SubElement(message, 'pubDate').text = dt.datetime.fromtimestamp(it['date'], tz=dt.timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
     return ET.tostring(rss, encoding='utf-8', xml_declaration=True)
