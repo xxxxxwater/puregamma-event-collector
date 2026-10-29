@@ -463,9 +463,27 @@ def telegram_send(token, chat_id, message):
         return False, None, 90, "network failure"
 
 
-def process_outbox(con, token, chat_id, now, translator=None):
+def expire_stale_outbox(con, now, max_age_h=24, p2_age_h=6):
+    """Drop pending pushes that outlived the enqueue age limits.
+
+    After a long Telegram outage, collector downtime or a message Telegram keeps
+    rejecting, a "breaking" alert hours late is noise; the event stays queryable.
+    """
+    cur = con.execute("""UPDATE outbox SET status='expired', last_error='stale: not delivered in time'
+                         WHERE status='pending' AND due_at<=? AND
+                         (SELECT last_seen FROM events e WHERE e.id=outbox.event_id)
+                             < ? - CASE WHEN priority='P2' THEN ? ELSE ? END""",
+                      (now, now, int(p2_age_h) * 3600, int(max_age_h) * 3600))
+    if cur.rowcount:
+        con.commit()
+        LOG.warning("outbox expired stale notifications count=%d", cur.rowcount)
+    return cur.rowcount
+
+
+def process_outbox(con, token, chat_id, now, translator=None, max_age_h=24, p2_age_h=6):
     # P0/P1 immediate; P2 grouped hourly (max 5 items per digest).
     translator = translator or Translator(enabled=False)
+    expire_stale_outbox(con, now, max_age_h, p2_age_h)
     rows = con.execute("""SELECT o.id, o.attempts, o.priority, e.* FROM outbox o
                           JOIN events e ON e.id=o.event_id WHERE o.status='pending' AND o.due_at<=?
                           ORDER BY o.due_at ASC, o.id ASC LIMIT 20""", (now,)).fetchall()
@@ -525,6 +543,7 @@ def process_outbox(con, token, chat_id, now, translator=None):
 def cleanup(con, days):
     cutoff = utc_now() - int(days) * 86400
     con.execute("DELETE FROM outbox WHERE status='sent' AND sent_at<?", (cutoff,))
+    con.execute("DELETE FROM outbox WHERE status='expired' AND due_at<?", (cutoff,))
     con.execute("DELETE FROM articles WHERE discovered<? AND event_id NOT IN (SELECT event_id FROM outbox WHERE status='pending')", (cutoff,))
     con.execute("DELETE FROM events WHERE discovered<? AND id NOT IN (SELECT event_id FROM articles) AND id NOT IN (SELECT event_id FROM outbox)", (cutoff,))
     con.commit()
@@ -619,7 +638,9 @@ def main():
                     except Exception as err:
                         result = err
                     ingest_result(con, src, result, utc_now(), config["settings"])
-                process_outbox(con, token, chat_id, utc_now(), translator)
+                process_outbox(con, token, chat_id, utc_now(), translator,
+                               int(config["settings"]["max_notification_age_hours"]),
+                               int(config["settings"]["max_p2_age_hours"]))
                 if now - last_cleanup >= 86400:
                     cleanup(con, int(config["settings"]["db_retention_days"]))
                     last_cleanup = now

@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import main as collector
@@ -155,6 +156,50 @@ class FetchTests(unittest.TestCase):
             collector.fetch(self.serve(handler), None, None,
                             {"http_timeout_seconds": 1, "http_total_timeout_seconds": 0.5, "max_feed_bytes": 4096})
         self.assertLess(time.monotonic() - started, 2)
+
+
+class OutboxTests(CollectorDb):
+    def queue(self, event_id, priority, last_seen, status="pending"):
+        self.con.execute("INSERT INTO events(id,title,canonical_title,source,link,category,priority,trust,published,discovered,last_seen)"
+                         " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                         (event_id, "Headline " + event_id, "headline", "News", "", "general", priority, "B", None, last_seen, last_seen))
+        self.con.execute("INSERT INTO outbox(event_id,priority,status,due_at) VALUES (?,?,?,?)", (event_id, priority, status, last_seen))
+        self.con.commit()
+
+    def status(self, event_id):
+        return self.scalar("SELECT status FROM outbox WHERE event_id=?", event_id)
+
+    def test_stale_pending_notifications_expire_instead_of_sending(self):
+        self.queue("fresh_p1", "P1", NOW - 23 * 3600)
+        self.queue("stale_p1", "P1", NOW - 25 * 3600)
+        self.queue("fresh_p2", "P2", NOW - 5 * 3600)
+        self.queue("stale_p2", "P2", NOW - 7 * 3600)
+        with patch.object(collector, "telegram_send", return_value=(True, 42, 0, None)) as send, \
+                patch.object(collector.time, "sleep"):
+            delivered = collector.process_outbox(self.con, "t:k", "1", NOW, max_age_h=24, p2_age_h=6)
+        self.assertEqual(delivered, 2)
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual([self.status(e) for e in ("fresh_p1", "stale_p1", "fresh_p2", "stale_p2")],
+                         ["sent", "expired", "sent", "expired"])
+
+    def test_failed_send_is_retried_later_then_expires(self):
+        self.queue("evt", "P1", NOW - 60)
+        with patch.object(collector, "telegram_send", return_value=(False, None, 60, "HTTP 400")), \
+                patch.object(collector.time, "sleep"):
+            collector.process_outbox(self.con, "t:k", "1", NOW)
+            row = self.con.execute("SELECT status, attempts, due_at FROM outbox").fetchone()
+            self.assertEqual(tuple(row), ("pending", 1, NOW + 60))
+            collector.process_outbox(self.con, "t:k", "1", NOW + 25 * 3600)
+        self.assertEqual(self.status("evt"), "expired")
+
+    def test_cleanup_purges_old_expired_rows_and_their_events(self):
+        old = NOW - 61 * 86400
+        self.queue("expired_old", "P1", old, status="expired")
+        self.queue("pending_old", "P1", old)
+        with patch.object(collector, "utc_now", return_value=NOW):
+            collector.cleanup(self.con, 60)
+        self.assertIsNone(self.con.execute("SELECT 1 FROM events WHERE id='expired_old'").fetchone())
+        self.assertEqual(self.status("pending_old"), "pending")
 
 
 if __name__ == "__main__":
