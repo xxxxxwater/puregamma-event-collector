@@ -62,5 +62,51 @@ class ParseFeedTests(unittest.TestCase):
             collector.parse_feed(b"<html><body>503</body></html>")
 
 
+NOW = 1793210400
+SETTINGS = {"max_notification_age_hours": 24, "max_p2_age_hours": 6}
+NEWS = {"id": "news", "name": "News", "trust": "B", "default_priority": "P1", "interval_seconds": 60}
+
+
+def entry(i, published=NOW - 60, title=None):
+    return {"title": title or f"Distinct headline number {i} about markets", "link": f"https://t.me/news/{i}",
+            "guid": "", "summary": "", "published": published}
+
+
+class CollectorDb(unittest.TestCase):
+    def setUp(self):
+        self.con = sqlite3.connect(":memory:")
+        self.con.row_factory = sqlite3.Row
+        collector.init_db(self.con, [OFFICIAL, NEWS])
+
+    def tearDown(self):
+        self.con.close()
+
+    def scalar(self, sql, *args):
+        return self.con.execute(sql, args).fetchone()[0]
+
+
+class SeedingTests(CollectorDb):
+    def test_first_non_empty_fetch_is_baseline_only(self):
+        collector.ingest_result(self.con, NEWS, ([entry(i) for i in range(5)], "e1", None, False), NOW, SETTINGS)
+        self.assertEqual(self.scalar("SELECT seeded FROM sources WHERE id='news'"), 1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM outbox"), 0)
+        collector.ingest_result(self.con, NEWS, ([entry(i) for i in range(6)], "e2", None, False), NOW + 60, SETTINGS)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM outbox"), 1)
+
+    def test_empty_first_fetch_does_not_complete_baseline(self):
+        collector.ingest_result(self.con, NEWS, ([], "empty-etag", None, False), NOW, SETTINGS)
+        row = self.con.execute("SELECT seeded, etag FROM sources WHERE id='news'").fetchone()
+        self.assertEqual((row["seeded"], row["etag"]), (0, None))
+        backlog = [entry(i, published=NOW - 600 * i) for i in range(50)]
+        collector.ingest_result(self.con, NEWS, (backlog, "e2", None, False), NOW + 60, SETTINGS)
+        self.assertEqual(self.scalar("SELECT seeded FROM sources WHERE id='news'"), 1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM outbox"), 0)
+
+    def test_not_modified_before_seed_clears_validators(self):
+        collector.ingest_result(self.con, NEWS, ([], "stale", "Wed", True), NOW, SETTINGS)
+        row = self.con.execute("SELECT seeded, etag, modified FROM sources WHERE id='news'").fetchone()
+        self.assertEqual(tuple(row), (0, None, None))
+
+
 if __name__ == "__main__":
     unittest.main()

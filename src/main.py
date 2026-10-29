@@ -376,10 +376,14 @@ def ingest_result(con, source, result, now, config):
         etag, modified = None, None
     added, events_added, enqueued = (0, 0, 0) if not_changed else add_entries(
         con, source, entries, now, seeded, int(config["max_notification_age_hours"]), int(config["max_p2_age_hours"]))
+    # An empty first response (RSSHub hiccup, upstream truncation) is not a
+    # baseline: seeding on it would push the whole backlog on the next fetch.
+    now_seeded = seeded or (not not_changed and bool(entries))
     con.execute("UPDATE sources SET seeded=?, etag=?, modified=?, last_ok=?, last_check=?, last_error=NULL, consecutive_errors=0, next_at=? WHERE id=?",
-                (int(seeded or not not_changed), etag, modified, now, now, now + interval + random.randint(0, 8), source["id"]))
+                (int(now_seeded), etag if now_seeded else None, modified if now_seeded else None,
+                 now, now, now + interval + random.randint(0, 8), source["id"]))
     con.commit()
-    if added or enqueued or not seeded:
+    if added or enqueued or now_seeded != seeded:
         LOG.info("source=%s seed=%s entries=%d new_events=%d enqueued=%d", source["id"], "complete" if not seeded else "done", added, events_added, enqueued)
 
 
