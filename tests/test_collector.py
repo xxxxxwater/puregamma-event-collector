@@ -1,5 +1,8 @@
+import socket
 import sqlite3
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -106,6 +109,52 @@ class SeedingTests(CollectorDb):
         collector.ingest_result(self.con, NEWS, ([], "stale", "Wed", True), NOW, SETTINGS)
         row = self.con.execute("SELECT seeded, etag, modified FROM sources WHERE id='news'").fetchone()
         self.assertEqual(tuple(row), (0, None, None))
+
+
+class FetchTests(unittest.TestCase):
+    FEED = b"<rss><channel><item><title>Fed holds rates</title><link>https://example.com/a</link></item></channel></rss>"
+
+    def serve(self, handler):
+        listener = socket.create_server(("127.0.0.1", 0))
+        self.addCleanup(listener.close)
+
+        def run():
+            conn, _ = listener.accept()
+            with conn:
+                conn.recv(65536)
+                handler(conn)
+        threading.Thread(target=run, daemon=True).start()
+        return {"url": "http://127.0.0.1:%d/feed" % listener.getsockname()[1]}
+
+    def test_reads_feed_and_validators(self):
+        def handler(conn):
+            conn.sendall(b"HTTP/1.1 200 OK\r\nETag: \"v1\"\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
+                         % len(self.FEED) + self.FEED)
+        entries, etag, _modified, not_changed = collector.fetch(
+            self.serve(handler), None, None, {"http_timeout_seconds": 5, "max_feed_bytes": 4096})
+        self.assertEqual([e["title"] for e in entries], ["Fed holds rates"])
+        self.assertEqual((etag, not_changed), ('"v1"', False))
+
+    def test_body_over_limit_without_content_length_is_rejected(self):
+        def handler(conn):
+            conn.sendall(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + b" " * 5000)
+        with self.assertRaisesRegex(ValueError, "max length"):
+            collector.fetch(self.serve(handler), None, None, {"http_timeout_seconds": 5, "max_feed_bytes": 4096})
+
+    def test_trickling_server_hits_total_deadline(self):
+        def handler(conn):
+            conn.sendall(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n<rss><channel>")
+            try:
+                for _ in range(40):
+                    time.sleep(0.1)
+                    conn.sendall(b" ")
+            except OSError:
+                pass
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            collector.fetch(self.serve(handler), None, None,
+                            {"http_timeout_seconds": 1, "http_total_timeout_seconds": 0.5, "max_feed_bytes": 4096})
+        self.assertLess(time.monotonic() - started, 2)
 
 
 if __name__ == "__main__":

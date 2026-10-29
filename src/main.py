@@ -287,13 +287,26 @@ def fetch(source, etag, modified, config):
     if modified:
         headers["If-Modified-Since"] = modified
     req = urllib.request.Request(source["url"], headers=headers)
+    timeout = int(config["http_timeout_seconds"])
+    # urlopen's timeout applies per socket operation; a server dribbling bytes
+    # could otherwise hold a worker, and the whole poll loop, indefinitely.
+    deadline = time.monotonic() + float(config.get("http_total_timeout_seconds", timeout * 3))
     try:
-        with urllib.request.urlopen(req, timeout=int(config["http_timeout_seconds"])) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             length = int(response.headers.get("Content-Length") or 0)
             limit = int(config["max_feed_bytes"])
             if length > limit:
                 raise ValueError("feed exceeds configured max length")
-            body = response.read(limit + 1)
+            chunks, size = [], 0
+            while size <= limit:
+                chunk = response.read1(min(65536, limit + 1 - size))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+                if time.monotonic() > deadline:
+                    raise TimeoutError("feed download exceeded total timeout")
+            body = b"".join(chunks)
             if len(body) > limit:
                 raise ValueError("feed exceeds configured max length")
             entries = parse_feed(body)
