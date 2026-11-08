@@ -361,8 +361,10 @@ class Collector:
         pids = {label: pid for label, pid, _ in self.forecast_targets()}
         for f in store.due_forecasts(self.con, now):
             target_hour = f["created_at"] + f["horizon_h"] * HOUR
+            # Only the bar closing at the horizon represents this outcome.
+            # Older bars must not permanently score a delayed data collection.
             bars = [b for b in store.candles(self.con, pids.get(f["target"], ""), 3600, since=f["created_at"])
-                    if b["start"] <= target_hour - HOUR]
+                    if b["start"] == target_hour - HOUR]
             if bars:
                 realized, hit, in_range = forecast.evaluate(f, bars[-1]["close"])
                 store.finish_forecast(self.con, f["id"], now, realized, hit, in_range)
@@ -382,3 +384,4 @@ class Collector:
 
     def prune(self, now):
         return f"{store.prune(self.con, now)} rows removed"
+
