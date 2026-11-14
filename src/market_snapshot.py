@@ -5,6 +5,7 @@ blocks the others. Besides Telegram sections it yields per-symbol cards for /q a
 the anomaly list used by the push policy.
 """
 import logging
+import math
 
 import market_analysis as analysis
 import market_digest as digest
@@ -17,7 +18,7 @@ import market_store as store
 
 LOG = logging.getLogger("market.snapshot")
 HOUR = 3600
-FRESH = {"overview": 3600, "contracts": 3600, "equity": 3 * 3600}
+FRESH = {"overview": 3600, "contracts": 3600, "equity": 3 * 3600, "forecast": 3600}
 PART_SECTIONS = {
     "crypto": ("crypto_flow", "crypto_top", "crypto_alerts"),
     "deriv": ("crypto_deriv", "macro"),
@@ -32,6 +33,12 @@ PART_TITLES = {
     "sectors": render.SECTORS_TITLE, "etf": render.ETF_TITLE, "equity_alerts": render.EQUITY_ALERTS_TITLE,
     "forecast": render.FORECAST_TITLE,
 }
+
+
+def forecast_fresh(at, now):
+    """Hourly forecasts expire by generation time, never by snapshot time."""
+    return (isinstance(at, (int, float)) and not isinstance(at, bool)
+            and math.isfinite(at) and at > 0 and 0 <= now - at <= FRESH["forecast"])
 
 
 class SnapshotBuilder:
@@ -159,15 +166,19 @@ class SnapshotBuilder:
         outlooks = self.collector.cache.get("outlooks")
         if not outlooks or not any(outlooks.values()):
             raise sources.SourceError("研判尚未生成（等待 K 线回填）")
+        data_at = self.collector.cache.get("outlooks_at")
+        if not forecast_fresh(data_at, ctx["now"]):
+            raise sources.SourceError("研判生成时间无效或已超过 60 分钟未更新")
         labels = [label for label, _, _ in self.collector.forecast_targets()]
         records = {label: store.forecast_record(self.con, label, ctx["now"] - 30 * 86400) for label in labels}
         backtests = {label: store.meta_json(self.con, "backtest:" + label, {}) for label in labels}
         ctx["sections"]["forecast"] = render.forecast([(label, outlooks.get(label)) for label in labels],
                                                       records, backtests)
+        ctx["sections"]["forecast"] += "\n<i>研判生成：%s（北京时间）；24 小时区间从该时刻起算</i>" % render.bj(data_at, "%m-%d %H:%M")
         ctx["metrics"]["forecast"] = {label: {k: o[k] for k in ("score", "direction", "low", "high")}
                                       for label, o in outlooks.items() if o}
         ctx["metrics"]["forecast"]["digest"] = digest.forecast(labels, outlooks, records, backtests,
-                                                               self.collector.cache.get("outlooks_at") or ctx["now"])
+                                                               data_at)
 
     def _cards(self, ctx):
         for row in ctx.get("equity_rows", []):
@@ -185,3 +196,4 @@ class SnapshotBuilder:
     @staticmethod
     def anomalies(ctx):
         return [a for part in ("crypto", "deriv", "equity") for a in ctx["anomalies"].get(part, [])]
+

@@ -112,12 +112,19 @@ class MarketService:
             if status.get(key) == "ok":
                 continue
             good = store.last_good(self.con, key, now - REUSE_MAX_AGE)
+            reused_at = good["taken_at"] if good else None
+            if good and key == "forecast":
+                # A recent snapshot may contain an old forecast. Never renew
+                # its lifetime by copying it into another snapshot.
+                reused_at = ((good["metrics"].get(key) or {}).get("digest") or {}).get("at")
+                if not snapshots.forecast_fresh(reused_at, now):
+                    good = None
             if good:
                 # Last known good data (<= 1h) beats a blank section; say so explicitly.
                 for name in names:
                     if good["sections"].get(name):
-                        sections[name] = render.reused(good["sections"][name], good["taken_at"], status[key])
-                metrics[key] = dict(good["metrics"].get(key) or {}, reused_from=good["taken_at"])
+                        sections[name] = render.reused(good["sections"][name], reused_at, status[key])
+                metrics[key] = dict(good["metrics"].get(key) or {}, reused_from=reused_at)
                 status[key] = "reused: " + status[key]
             else:
                 for name in names:
@@ -370,3 +377,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
